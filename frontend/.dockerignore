@@ -1,0 +1,13 @@
+# Keep the build context small and prevent local artefacts or secrets from
+# leaking into an image layer.
+node_modules
+.next
+out
+.env
+.env.*
+!.env.example
+*.log
+.git
+.DS_Store
+.vscode
+.idea

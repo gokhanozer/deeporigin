@@ -1,0 +1,842 @@
+# Implementation Notes — Shortly URL Shortener
+
+Complete technical documentation for the DeepOrigin full-stack task.
+
+This document explains **what** was built, **how** it works, and — most importantly —
+**why** each decision was made. Where a choice involved a genuine trade-off, both sides
+are stated along with the conditions under which the other option would win.
+
+---
+
+## Table of contents
+
+1. [Overview](#1-overview)
+2. [Architecture](#2-architecture)
+3. [Technology choices](#3-technology-choices)
+4. [Data model](#4-data-model)
+5. [Request lifecycles](#5-request-lifecycles)
+6. [Reusable function catalogue](#6-reusable-function-catalogue)
+7. [API reference](#7-api-reference)
+8. [Frontend structure](#8-frontend-structure)
+9. [Security](#9-security)
+10. [Rate limiting](#10-rate-limiting)
+11. [Analytics and the dashboard](#11-analytics-and-the-dashboard)
+12. [Testing](#12-testing)
+13. [Docker and deployment](#13-docker-and-deployment)
+14. [Requirement traceability](#14-requirement-traceability)
+15. [Known limitations and what I would do next](#15-known-limitations-and-what-i-would-do-next)
+
+---
+
+## 1. Overview
+
+Shortly turns a long URL into a short one, redirects visitors to the original, and reports
+how popular each link is.
+
+**Core loop**
+
+```
+User pastes https://some.place.example.com/foo/bar/biz
+      ↓  POST /api/v1/links
+Backend validates the URL, generates a unique slug, persists a Link row
+      ↓
+User receives http://localhost:3000/abc123  (one click to clipboard)
+      ↓
+Visitor opens the short URL
+      ↓  Next.js [slug] route resolves it server-side
+Backend records a Visit and returns the destination
+      ↓
+Visitor is redirected (307) to the original URL
+      ↓
+Owner sees the click on the dashboard
+```
+
+**Design principles applied throughout**
+
+| Principle | How it shows up |
+|---|---|
+| Logic lives in small, pure, reusable functions | `common/utils/*` — no framework or DB coupling, unit-tested in isolation |
+| One source of truth per rule | Slug rules, URL rules and pagination bounds each exist in exactly one module |
+| Validate at the edge, trust nothing after | DTOs + `ValidationPipe` reject malformed input before a controller runs |
+| Fail loudly at start-up, gracefully at runtime | Env validation crashes on boot; analytics failures never break a redirect |
+| The database enforces its own invariants | Slug uniqueness is an index, not an application check |
+| Anonymous use is first-class | Shortening never requires an account |
+
+---
+
+## 2. Architecture
+
+```
+                        ┌──────────────────────────────────────┐
+   Browser ────────────▶│  Next.js frontend        :3000       │
+                        │                                      │
+   http://host/abc123 ──▶  app/[slug]/page.tsx  (server)       │
+                        │  app/page.tsx         (shorten form) │
+                        │  app/dashboard        (analytics)    │
+                        └──────────────┬───────────────────────┘
+                                       │  REST, JSON
+                                       ▼
+                        ┌──────────────────────────────────────┐
+                        │  NestJS API              :4000       │
+                        │                                      │
+                        │  AuthModule    JWT register / login  │
+                        │  LinksModule   CRUD + custom slugs   │
+                        │  RedirectModule slug → destination   │
+                        │  VisitsModule  click tracking        │
+                        │  AnalyticsModule aggregation         │
+                        │                                      │
+                        │  Global: throttler · exception filter │
+                        │          validation pipe · logging   │
+                        └──────────────┬───────────────────────┘
+                                       │  Prisma
+                                       ▼
+                        ┌──────────────────────────────────────┐
+                        │  PostgreSQL              :5433       │
+                        │  users · links · visits              │
+                        └──────────────────────────────────────┘
+```
+
+The API tier is horizontally scalable. With `--scale backend=3` the shape becomes:
+
+```
+   Browser ──▶ nginx (lb) :4000 ──┬──▶ backend-1 ─┐
+                                  ├──▶ backend-2 ─┼──▶ PostgreSQL :5433
+                                  └──▶ backend-3 ─┘
+                                        │
+                                        └──────────▶ Redis :6379
+                                                     shared rate-limit counters
+
+   A one-shot `migrate` job applies the schema once, before any replica starts.
+```
+
+nginx owns the published host port (only one container can), and resolves
+`backend` through Docker's embedded DNS on a short TTL so replicas can come and
+go without restarting it. Full detail in [`SCALING.md`](SCALING.md).
+
+### Why short links resolve on the *frontend* domain
+
+The brief specifies `https://{domain}/abc123`. Two placements were possible:
+
+| Option | Consequence |
+|---|---|
+| Backend serves `/{slug}` | Short URLs carry the API's host and port (`:4000`), which is not what a user wants to share |
+| **Frontend serves `/{slug}`** ✅ | Short URLs live on the same clean domain as the app, exactly matching the brief |
+
+The Next.js catch-all route (`app/[slug]/page.tsx`) is a **server component**, which matters:
+
+- the redirect is issued before any HTML reaches the browser — no flash of an intermediate page;
+- the visitor's IP and User-Agent are read server-side and forwarded to the API, so tracking
+  cannot be blocked or forged by client-side script;
+- **short links work with JavaScript disabled**.
+
+Route precedence resolves collisions: Next matches static segments (`/links`, `/dashboard`)
+before the dynamic one, and the backend's reserved-slug list prevents anyone from claiming
+those names in the first place.
+
+The backend *also* exposes `GET /api/v1/redirect/:slug`, which issues a real 302. This keeps
+the API independently usable (curl, tests, or pointing a short domain straight at it).
+
+---
+
+## 3. Technology choices
+
+| Layer | Choice | Why |
+|---|---|---|
+| Backend framework | **NestJS** | Named as DeepOrigin's internal stack. Its DI container makes the service layer trivially testable, and guards/filters/interceptors express cross-cutting concerns without touching feature code |
+| ORM | **Prisma** | Generates types from the schema, so a column rename becomes a compile error rather than a runtime one. Its migration workflow is straightforward and its query API is readable |
+| Database | **PostgreSQL** | Named as the internal stack. Real unique constraints, partial indexes and transactions — all of which this design leans on |
+| Frontend | **Next.js App Router** | Named as the internal stack. Server components are what make the redirect route work without a client-side flash |
+| Styling | **Tailwind CSS v4** | Utility classes keep styling next to markup; the v4 CSS-first config puts design tokens in `globals.css` with no JS config file |
+| Auth | **JWT + Passport** | Stateless, so the API scales horizontally with no shared session store |
+| Password hashing | **bcrypt** | Deliberately slow and self-salting. `bcryptjs` (pure JS) avoids native build steps in Alpine containers |
+| Charts | **Hand-written SVG** | The app needs two chart forms. A dependency-free implementation keeps the bundle small and gives full control over accessibility and hover behaviour |
+| Slug generation | **`crypto.randomInt`** | Slugs are public identifiers; `Math.random` is predictable and would let anyone enumerate every link |
+
+### Deliberately avoided
+
+- **`nanoid`** — v5 is ESM-only, which fights CommonJS Nest builds. A 12-line generator over
+  an explicit alphabet is clearer and dependency-free.
+- **`ua-parser-js`** — the dashboard needs a coarse browser/OS/device split, not a full
+  device database. ~80 lines removes a supply-chain dependency.
+- **A charting library** — Recharts and friends add 100 kB+ for two chart forms.
+*(Redis was on this list originally, on the grounds that an in-memory rate limiter is
+correct for a single instance. It has since been added — see
+[`SCALING.md`](SCALING.md) — because the app now runs multiple backend replicas, where
+per-process counters silently multiply the configured limit. The in-memory path remains
+the default when `REDIS_URL` is unset, so tests and local development stay
+dependency-free.)*
+
+---
+
+## 4. Data model
+
+```prisma
+User  ──1:N──▶  Link  ──1:N──▶  Visit
+```
+
+### `users`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `uuid` PK | UUID, not serial — IDs appear in URLs and must not be guessable or countable |
+| `email` | `text` UNIQUE | Stored lower-cased and trimmed |
+| `passwordHash` | `text` | bcrypt hash; the plaintext is never persisted |
+| `displayName` | `text?` | Optional |
+
+### `links`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `slug` | `text` **UNIQUE** | The uniqueness requirement, enforced by the database |
+| `targetUrl` | `text` | Normalised absolute http(s) URL |
+| `title` | `text?` | Optional label |
+| `isCustomSlug` | `bool` | Whether the user chose the slug |
+| `visitCount` | `int` | **Denormalised** counter — see below |
+| `lastVisitedAt` | `timestamp?` | |
+| `isActive` | `bool` | Soft disable without deleting |
+| `expiresAt` | `timestamp?` | Optional expiry |
+| `ownerId` | `uuid?` | **NULL for anonymous links** |
+
+Indexes: `(ownerId, createdAt)` for "my links, newest first"; `(visitCount)` for the
+popularity ranking; plus the unique index on `slug`.
+
+### `visits`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `linkId` | `uuid` FK | `ON DELETE CASCADE` |
+| `occurredAt` | `timestamp` | |
+| `ipHash` | `text?` | **Salted SHA-256, never the raw IP** |
+| `userAgent` | `text?` | Retained for future parsing improvements |
+| `browser` / `os` / `deviceType` | `text?` | Derived at write time so reads stay cheap |
+| `referrer` | `text?` | Referring **host** only |
+
+Indexes: `(linkId, occurredAt)` for per-link windows; `(occurredAt)` for the global trend.
+
+### Two decisions worth explaining
+
+**Why store raw `Visit` rows instead of just a counter?**
+A counter answers "how many?" and nothing else. The brief asks for a dashboard showing *how
+popular* links are, which means trends over time, traffic sources and audience. Those
+questions cannot be reconstructed from an integer. Raw events keep every future question
+answerable.
+
+**Then why *also* keep `visitCount`?**
+Because the link list renders a visit count per row. Without the counter, that is a
+`COUNT(*)` subquery per row on the largest table in the schema. Reading one integer is
+orders of magnitude cheaper. The counter is a cache; the `visits` table remains the source
+of truth. Both are written in a single transaction, so they cannot diverge:
+
+```ts
+await this.prisma.$transaction([
+  this.prisma.visit.create({ data: { linkId, /* … */ } }),
+  this.prisma.link.update({
+    where: { id: linkId },
+    data: { visitCount: { increment: 1 }, lastVisitedAt: occurredAt },
+  }),
+]);
+```
+
+`{ increment: 1 }` is an atomic server-side update, so two simultaneous clicks cannot lose
+a count the way a read-modify-write would.
+
+---
+
+## 5. Request lifecycles
+
+### 5.1 Creating a short link
+
+```
+POST /api/v1/links  { "url": "example.com/foo", "slug": "my-link"? }
+  │
+  ├─ ThrottlerProxyGuard      10 requests/min per client
+  ├─ OptionalJwtAuthGuard     attaches the user if signed in; never rejects
+  ├─ ValidationPipe           CreateLinkDto — types, lengths, character set
+  │
+  ├─ LinksService.create()
+  │    ├─ validateUrl()       WHATWG parse · http(s) only · SSRF guard
+  │    ├─ validateSlug()      format + reserved words        (custom slug only)
+  │    └─ INSERT              unique index is the arbiter
+  │
+  └─ 201 { id, slug, shortUrl, targetUrl, … }
+```
+
+**The slug-collision strategy is the most interesting part.** The naive approach —
+`SELECT` to check availability, then `INSERT` — contains a race: between the two statements
+another request can take the same slug, and the insert fails anyway. So:
+
+- **Generated slugs** are inserted *optimistically*. On a `P2002` unique violation the
+  service generates a fresh slug and retries, up to `MAX_SLUG_ATTEMPTS`. The database is the
+  only arbiter, which makes the operation race-free by construction.
+- **Custom slugs** are *not* retried. If a user asks for `my-link` and it is taken, silently
+  substituting a random slug would be wrong. The API returns `409 Conflict` with an
+  actionable message.
+
+With a 7-character slug over a 62-character alphabet the keyspace is 62⁷ ≈ 3.5 × 10¹², so
+retries are vanishingly rare in practice — but correctness does not depend on that.
+
+### 5.2 Following a short link
+
+```
+GET http://localhost:3000/abc123
+  │
+  ├─ Next.js app/[slug]/page.tsx  (server component, force-dynamic)
+  │    └─ POST /api/v1/redirect/abc123/resolve
+  │         { ip, userAgent, referrer }   ← forwarded from the visitor's request
+  │
+  ├─ RedirectService.resolve()
+  │    ├─ findUnique({ slug })     single indexed lookup — the hot path
+  │    ├─ isLinkResolvable()       active? not expired?
+  │    └─ void recordVisit(…)      NOT awaited (see below)
+  │
+  └─ 307 → https://some.place.example.com/foo/bar/biz
+     or notFound() → the 404 page
+```
+
+Three points worth drawing out:
+
+**Visitor metadata is passed in the request body.** This is a server-to-server call. Without
+explicit forwarding, every visit would be attributed to the frontend container's IP and
+Node's default User-Agent, making the analytics meaningless.
+
+**The visit write is deliberately not awaited.** Awaiting it would add a database round-trip
+to the latency of every redirect — which visitors feel directly. `recordVisit` swallows its
+own errors, so a floating promise can never produce an unhandled rejection. Analytics
+degrade to a missing data point; the redirect itself never breaks.
+
+**307, not 301.** Browsers cache permanent redirects aggressively and often indefinitely.
+A 301 would break slug editing (the requirement that users can change a slug) and would
+under-count visits, because a cached redirect never reaches the server again.
+
+**Unknown, disabled and expired links are reported identically.** A visitor cannot tell
+which case applies, so no information leaks about links that once existed.
+
+---
+
+## 6. Reusable function catalogue
+
+The brief asked for the application to be built from reusable functions. Every non-trivial
+piece of logic is a small, documented, independently testable unit. Nothing below imports a
+framework or touches the database.
+
+### Backend — `src/common/utils/`
+
+**`slug.util.ts`**
+
+| Function | Purpose |
+|---|---|
+| `generateSlug(length)` | Cryptographically random slug from a fixed alphabet |
+| `generateUsableSlug(length)` | As above, re-rolling until the result is not reserved |
+| `validateSlug(slug)` | All rules at once → `{ valid, reason? }` |
+| `normalizeSlug(slug)` | Trims whitespace and a leading slash |
+| `isValidSlug(slug)` | Boolean convenience wrapper |
+
+**`url.util.ts`**
+
+| Function | Purpose |
+|---|---|
+| `ensureProtocol(input)` | Adds `https://` when the user omitted a scheme |
+| `validateUrl(input, allowPrivate)` | Full validation → `{ valid, reason?, normalized? }` |
+| `normalizeUrl(url)` | Canonical form: lower-case host, no default port |
+| `extractDomain(url)` | Hostname without `www.` |
+| `buildShortUrl(base, slug)` | The single place a short URL is assembled |
+| `isPrivateHostname(host)` | Loopback / RFC1918 / link-local detection |
+| `truncateUrl(url, max)` | Middle-elided display form |
+
+**`user-agent.util.ts`** — `parseUserAgent`, `detectBrowser`, `detectOs`, `detectDeviceType`.
+Bots are classified before device type, so a crawler preview is never counted as a mobile
+visitor.
+
+**`request.util.ts`** — `extractClientIp` (X-Forwarded-For aware), `hashIp` (salted SHA-256),
+`extractReferrerHost`, `extractUserAgent`.
+
+**`pagination.util.ts`** — `normalizePage`, `normalizePageSize`, `toSkipTake`,
+`buildPaginationMeta`, `buildPaginatedResult`. Clamping lives here, so no endpoint can be
+made to return the whole table.
+
+**`date.util.ts`** — `startOfUtcDay`, `toUtcDateKey`, `daysAgo`, `buildDateRange`,
+`buildDailySeries`, `countByValue`. All UTC: mixing in the server's local timezone is a
+classic source of off-by-one-day bugs in dashboards.
+
+### Backend — cross-cutting
+
+| Unit | Role |
+|---|---|
+| `AllExceptionsFilter` | One error envelope for the whole API; translates Prisma codes to HTTP semantics |
+| `LoggingInterceptor` | Consistent access logs with timing |
+| `ThrottlerProxyGuard` | Rate limiting keyed on the real client, not the proxy |
+| `JwtAuthGuard` / `OptionalJwtAuthGuard` | Required vs. best-effort authentication |
+| `CurrentUser` | Typed `@CurrentUser() user` in place of untyped `req.user` |
+| `ThrottleAuth()` / `ThrottleCreate()` | Named per-route limits |
+| `toLinkDto` / `toLinkDtoList` / `isLinkResolvable` | Row → API mapping; resolvability in one place |
+| `hashPassword` / `verifyPassword` / `normalizeEmail` | Credential helpers |
+
+### Frontend — `src/lib/` and `src/hooks/`
+
+| Unit | Role |
+|---|---|
+| `apiRequest<T>` | The only place `fetch` is called; auth, query strings and errors handled once |
+| `ApiError` | Typed error with `isUnauthorized` / `isConflict` / `isRateLimited` |
+| `lib/api/{links,auth,analytics}.ts` | One named function per endpoint |
+| `validators.ts` | `validateUrl`, `validateSlug`, `validateEmail`, `validatePassword` |
+| `format.ts` | `formatNumber`, `formatRelativeTime`, `truncateMiddle`, `pluralize`, … |
+| `token-storage.ts` | Token persistence isolated behind four functions |
+| `useClipboard` | Copy with a self-resetting flag and an `execCommand` fallback |
+| `useAsyncData` | Fetch + loading/error state, guarded against out-of-order responses |
+| `useAsyncAction` | Submit/delete with pending and error state |
+| `useDebouncedValue` | Powers search and live slug checking |
+| `AuthProvider` / `ToastProvider` | App-wide auth and notifications |
+
+Every UI primitive (`Button`, `Input`, `Card`, `Modal`, `Alert`, `Badge`, `Spinner`,
+`EmptyState`, `Skeleton`, `CopyButton`) is parameterised rather than duplicated, so spacing,
+focus rings and disabled styling stay consistent everywhere.
+
+---
+
+## 7. API reference
+
+Base URL: `http://localhost:4000/api/v1` · Interactive docs at `/api/v1/docs`.
+
+### Auth
+
+| Method | Path | Auth | Description |
+|---|---|:--:|---|
+| `POST` | `/auth/register` | — | Create an account → `{ accessToken, user }` |
+| `POST` | `/auth/login` | — | Sign in → `{ accessToken, user }` |
+| `GET` | `/auth/me` | ✅ | Current user (used to restore a session) |
+
+### Links
+
+| Method | Path | Auth | Description |
+|---|---|:--:|---|
+| `POST` | `/links` | optional | Create a short link. Signed in ⇒ owned |
+| `GET` | `/links` | optional | List links. `?mineOnly=true` scopes to the caller |
+| `GET` | `/links/:id` | optional | Single link |
+| `PATCH` | `/links/:id` | ✅ owner | **Update the slug**, URL, title, active flag, expiry |
+| `DELETE` | `/links/:id` | ✅ owner | Delete the link and its visits |
+| `GET` | `/links/slug-available/:slug` | — | Live availability check |
+
+`GET /links` accepts `page`, `pageSize` (max 100), `search`, `sortBy`
+(`createdAt` \| `visitCount` \| `lastVisitedAt` \| `slug`), `sortOrder`, `mineOnly`.
+
+### Redirect
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/redirect/:slug/resolve` | Resolve **and record a visit** → `{ targetUrl }` |
+| `GET` | `/redirect/:slug` | Real 302 redirect |
+| `GET` | `/redirect/:slug/peek` | Resolve **without** recording a visit |
+
+### Analytics
+
+| Method | Path | Auth | Description |
+|---|---|:--:|---|
+| `GET` | `/analytics/overview?days=30` | optional | Dashboard. Signed in ⇒ own links; anonymous ⇒ public totals |
+| `GET` | `/analytics/links/:id?days=30` | owner | Per-link analytics |
+
+### Health
+
+`GET /health` (liveness) · `GET /health/ready` (includes a database round-trip)
+
+### Error format
+
+Every failure returns the same envelope, produced by `AllExceptionsFilter`:
+
+```json
+{
+  "statusCode": 400,
+  "error": "Bad Request",
+  "message": "Only http and https URLs are supported",
+  "details": ["optional field-level messages"],
+  "path": "/api/v1/links",
+  "timestamp": "2026-07-27T17:21:03.545Z"
+}
+```
+
+Because there is exactly one shape, the frontend's API client has exactly one contract to
+parse. Unexpected server errors return a generic message — internal details (connection
+strings, file paths, query fragments) are never echoed to a client.
+
+---
+
+## 8. Frontend structure
+
+### Routes
+
+| Route | Rendering | Purpose |
+|---|---|---|
+| `/` | Static shell + client | Shorten form and recent links |
+| `/[slug]` | **Dynamic (server)** | Resolve and redirect, or 404 |
+| `/links` | Static shell + client | All links in the database |
+| `/dashboard` | Static shell + client | Popularity dashboard |
+| `/dashboard/links/[id]` | Dynamic | Per-link analytics |
+| `/login`, `/register` | Static shell + client | Auth |
+| `not-found` | Static | The 404 page |
+
+### State management
+
+No Redux, no React Query. The app's needs are met by:
+
+- **`useAsyncData`** for server state — with a request-ID guard so a slow response can never
+  overwrite fresher data;
+- **`AuthProvider`** for the one genuinely global piece of state;
+- **`useState`** for local form state.
+
+Adding a data-fetching library would be reasonable at a larger scale; at this size it would
+be more moving parts than the problem justifies.
+
+### Accessibility
+
+- Every input has a real `<label>`; errors are wired via `aria-describedby` and `role="alert"`
+- Icon-only buttons carry `aria-label`
+- A single consistent `:focus-visible` ring, never removed
+- The modal uses native `<dialog>` + `showModal()` for free focus trapping and Escape handling
+- Charts expose `role="img"` with a summary **and** a visually-hidden data table
+- A skip-to-content link; `prefers-reduced-motion` respected
+- Active navigation marked with `aria-current="page"`
+
+---
+
+## 9. Security
+
+| Threat | Mitigation | Where |
+|---|---|---|
+| **Stored XSS via `javascript:` URLs** | Only `http:` and `https:` accepted; `javascript:` and `data:` rejected | `url.util.ts` |
+| **SSRF / internal network probing** | Loopback, RFC1918, link-local and cloud-metadata hosts blocked in production | `isPrivateHostname` |
+| **Password compromise** | bcrypt with a configurable cost factor; plaintext never stored or logged | `password.util.ts` |
+| **Account enumeration via login** | Identical message for unknown email and wrong password, plus a dummy hash comparison to equalise timing | `AuthService.login` |
+| **Brute force** | 5 auth requests/min per client | `ThrottleAuth()` |
+| **Spam link creation** | 10 creates/min per client | `ThrottleCreate()` |
+| **Mass assignment** | `whitelist` + `forbidNonWhitelisted` reject unknown properties | `main.ts` |
+| **SQL injection** | Parameterised Prisma queries; `sortBy` constrained to an allow-list | throughout |
+| **IDOR** | Ownership re-checked server-side on every mutation; `ownerId` never leaves the API | `assertOwnership` |
+| **Route shadowing** | Reserved-slug list blocks `login`, `api`, `dashboard`, … | `reserved-slugs.constant.ts` |
+| **Clickjacking / MIME sniffing** | `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy`, `Permissions-Policy` | `next.config.mjs` |
+| **Privacy of visitor IPs** | Salted SHA-256; raw IPs are never persisted | `hashIp` |
+| **Referrer leakage** | Only the referring *host* is stored, never the full URL with its query string | `extractReferrerHost` |
+| **Rate-limit evasion via spoofed headers** | `trust proxy` set to `1`, so only the immediate proxy is trusted | `main.ts` |
+| **Weak production secrets** | Boot fails if `JWT_SECRET` / `IP_HASH_SALT` are missing or short in production | `env.validation.ts` |
+
+### The one deliberate compromise: token storage
+
+The JWT is kept in `localStorage`, which means a successful XSS on this origin could read it.
+The more secure option is an httpOnly, `SameSite=Strict` cookie that JavaScript cannot touch —
+but that requires the API and frontend to share a registrable domain and adds a CSRF-token
+flow, which is disproportionate here.
+
+The choice is **contained within one module** (`lib/token-storage.ts`). Switching to cookies
+means rewriting four functions and nothing else in the app.
+
+---
+
+## 10. Rate limiting
+
+The brief asks for rate limiting to prevent bad actors. Limits are tiered by how damaging
+abuse of each endpoint would be:
+
+| Endpoint group | Limit | Rationale |
+|---|---|---|
+| Auth (`/auth/*`) | **5 / min** | Brute force and credential stuffing are the highest-value attacks |
+| Link creation (`POST /links`) | **10 / min** | The only anonymous endpoint that writes rows |
+| Everything else | **100 / min** | Generous enough for normal browsing |
+| Redirects (`/redirect/*`) | **exempt** | See below |
+| Health probes | **exempt** | Probes run on a schedule and would consume the orchestrator's budget |
+
+All limits are configurable through environment variables.
+
+### Two implementation details that turned out to matter
+
+**Counters are shared across replicas.** With `REDIS_URL` set, the throttler stores its
+counters in Redis instead of process memory. This is not optional once the API scales: each
+replica would otherwise keep its own counters and a 10/min limit would become 10×N/min.
+When `REDIS_URL` is unset it falls back to in-memory, which is correct for a single instance
+and keeps tests and local development free of a Redis dependency.
+
+The failure policy is **fail open, loudly**: if Redis is unreachable the guard admits the
+request rather than rejecting it, and logs at `error` level. Losing rate limiting is bad;
+refusing all traffic because a limiter is down is worse.
+
+**Buckets are keyed on the real client.** The stock `ThrottlerGuard` keys on `req.ip`, which
+behind a proxy is the *proxy's* address — every visitor would share one bucket.
+`ThrottlerProxyGuard` overrides the tracker to use the resolved client IP, and keys
+authenticated requests by user ID so colleagues behind one office NAT are not throttled as a
+single client. nginx forwards `X-Forwarded-For` for exactly this reason, and
+`trust proxy` is set to `1` to match that one-hop chain.
+
+**Only one named throttler is registered globally.** `@nestjs/throttler` v6 evaluates *every*
+named throttler against *every* route, so registering `default`, `create` and `auth`
+side-by-side would silently apply the strictest of the three everywhere. Overriding the single
+`default` bucket per-route is the correct way to express "most endpoints are generous, these
+few are strict". This is documented in `throttle.decorators.ts` because it is a genuine trap.
+
+**Redirects are exempt — and this was a bug found in testing, not a preference.** Because
+`/resolve` is called server-to-server by the frontend, every request carries the frontend
+container's IP. With the global 100/min limit in place, the limiter saw *all* redirect traffic
+as one client: during load testing most redirects returned `429` and their visits went
+unrecorded. Beyond the bug, serving redirects is the product — a shortener is expected to
+handle click volume, and the lookup is a single indexed read. Flood protection for reads
+belongs at the CDN or WAF, which can see the real client. The write paths remain tightly
+limited.
+
+---
+
+## 11. Analytics and the dashboard
+
+### Aggregation strategy
+
+`AnalyticsService` reads raw `visit` rows for the selected window and aggregates them in
+TypeScript, rather than issuing five separate `GROUP BY` queries. The reasoning:
+
+- one query serves **five** breakdowns (time-series, referrer, device, browser, OS) instead
+  of five round-trips;
+- the shared, unit-tested helpers in `date.util.ts` do the bucketing, so the same code
+  produces the same numbers everywhere;
+- the query is bounded by an indexed date window, so the row count scales with recent
+  traffic rather than with table size.
+
+At genuinely large volumes this becomes the wrong trade — see [§15](#15-known-limitations-and-what-i-would-do-next).
+
+Every dashboard query runs inside one transaction, so every number on screen describes the
+same instant.
+
+### Chart design
+
+Charts were built against an explicit visualization method rather than by eye.
+
+**Form follows the question.**
+
+| Data | Form | Why not the alternative |
+|---|---|---|
+| Daily visits over 30 days | **Area + line** | The question is the *shape* of a continuous trend. Bars would imply 30 discrete comparisons |
+| Referrers / devices / browsers | **Horizontal bars** | Labels are long text; horizontal gives each a full line. **Never a pie** — comparing angles is measurably harder than comparing aligned lengths, and these lists exceed what a pie can carry |
+| Totals | **Stat tiles** | A single number does not need a chart; it needs to be large and legible |
+| Top links | **Table with inline proportion bars** | Each row carries several attributes and users want to *look one up*, not only compare magnitudes |
+
+**Colour was computed, not chosen.** The categorical palette was run through a validator
+checking lightness band, chroma floor, colour-vision-deficiency separation, normal-vision
+separation and contrast against the dark surface (`#121826`).
+
+My first palette — indigo, sky, emerald, amber, rose, purple — **failed**: the
+indigo↔sky pair scored ΔE 13.5 for normal vision, below the 15 floor, meaning even
+full-colour-vision readers would struggle to tell adjacent series apart. It was replaced with
+a set stepped for dark surfaces that passes every check (worst adjacent CVD ΔE 8.4 protan;
+worst adjacent normal-vision ΔE 19.3; all slots ≥ 3:1 contrast). The values and this
+reasoning are recorded in `globals.css`.
+
+Note that chart marks deliberately do **not** use the brand indigo: chart colour encodes
+data, UI chrome signals interactivity, and conflating them makes both harder to read.
+
+**Other rules applied:** one axis, never dual; recessive grid lines behind the data; single
+series ⇒ no legend (the title names it); selective direct labels rather than a number on
+every point; a crosshair-and-tooltip hover layer; and a visually-hidden data table so the
+information is never conveyed by the picture alone.
+
+### Privacy
+
+Unique visitors are counted via distinct salted IP hashes. This answers "were these two
+visits the same person?" without storing personal data — the question the dashboard actually
+asks. Changing `IP_HASH_SALT` resets unique-visitor counts, which is the intended behaviour.
+
+---
+
+## 12. Testing
+
+**124 unit tests, all passing.**
+
+```
+PASS  src/common/utils/slug.util.spec.ts
+PASS  src/common/utils/url.util.spec.ts
+PASS  src/common/utils/date.util.spec.ts
+PASS  src/common/utils/pagination.util.spec.ts
+PASS  src/common/utils/user-agent.util.spec.ts
+PASS  src/links/links.mapper.spec.ts
+PASS  src/links/links.service.spec.ts
+
+Test Suites: 7 passed, 7 total
+Tests:       124 passed, 124 total
+```
+
+Coverage is concentrated where bugs would be expensive:
+
+| Area | Representative cases |
+|---|---|
+| Slug generation | Length bounds, alphabet safety, 1,000 draws without collision, reserved-word avoidance |
+| URL validation | `javascript:` / `data:` / `file:` rejection, SSRF hosts, scheme-less input, query and fragment preservation |
+| Date bucketing | UTC correctness at day boundaries, gap-filling, month rollover, events outside the window |
+| Pagination | Negative pages, oversized page sizes, exact division, empty results |
+| User-Agent | Edge-claiming-Chrome, iOS-claiming-macOS, bot detection, null input |
+| Link mapping | `isOwner` for owner / other user / anonymous, and that `ownerId` never leaks |
+| `LinksService` | Collision retry uses a *different* slug, custom slugs are never silently replaced, ownership enforcement, search and sort shape |
+
+`LinksService` is tested with a mocked Prisma client: these tests are about the service's
+*decisions* — retry, reject, enforce — and mocking keeps them fast and database-free. The
+database's own behaviour (the unique index firing) is the database's contract.
+
+### Manual end-to-end verification
+
+The full stack was exercised against the running containers:
+
+| # | Check | Result |
+|---|---|---|
+| 1 | Shorten a URL anonymously | ✅ `201` with `shortUrl` |
+| 2 | Invalid URL rejected | ✅ `400` "Please enter a valid URL" |
+| 3 | `javascript:` rejected | ✅ `400` |
+| 4 | Reserved slug rejected | ✅ `400` |
+| 5 | Custom slug accepted | ✅ `201` |
+| 6 | Duplicate slug | ✅ `409` |
+| 7 | Short URL redirects | ✅ `307` → target |
+| 8 | Unknown slug | ✅ `404` page |
+| 9–10 | Register, create owned link | ✅ |
+| 11 | Visits tracked | ✅ count incremented |
+| 12–13 | Slug edited; new works, old 404s | ✅ |
+| 14 | Non-owner cannot edit | ✅ `401` / `403` |
+| 15 | `mineOnly` requires auth | ✅ `403` anonymous |
+| 16 | Analytics correct | ✅ gap-free series, correct breakdowns |
+| 17 | Rate limiting | ✅ `201`×9 then `429` |
+| 18 | Wrong password | ✅ `401`, generic message |
+| 19 | All pages render; security headers present | ✅ |
+
+---
+
+## 13. Docker and deployment
+
+Both images are **multi-stage**: the toolchain is needed to build but is dead weight at
+runtime, so only compiled output and production dependencies reach the final stage.
+
+**Backend** — `deps` → `builder` (`prisma generate` + `nest build`, then `npm prune --omit=dev`
+and re-generate the client) → `runner`.
+
+**Frontend** — Next's `output: 'standalone'` emits a self-contained server with only the
+modules actually reached at runtime. `.next/static` must be copied separately, or every page
+loads without CSS or JavaScript.
+
+Both runtime images:
+
+- run as the non-root `node` user;
+- use `dumb-init` as PID 1, so `SIGTERM` reaches Node and `docker stop` is immediate rather
+  than waiting out the 10-second timeout;
+- declare a `HEALTHCHECK`, which compose uses to sequence start-up.
+
+### Gotchas handled
+
+**`NEXT_PUBLIC_*` is inlined at build time**, not read at runtime. These are passed as Docker
+**build args**; setting them only in `environment:` would leave the browser calling the
+default localhost URL.
+
+**Two API URLs are needed.** `NEXT_PUBLIC_API_URL` is resolved by the visitor's *browser*
+(`localhost:4000`); `API_INTERNAL_URL` is used by server-side code over the compose network
+(`backend:4000`). Using one for both breaks in one direction or the other.
+
+**Start-up ordering uses health checks**, not plain `depends_on`. A container being "started"
+says nothing about readiness — the backend would otherwise race Postgres and crash on its
+first query.
+
+**Migrations run once per deploy, as a dedicated job.** A one-shot `migrate` service runs
+`prisma migrate deploy` (which only applies committed migrations and never prompts, making
+it safe unattended); the backend waits on `condition: service_completed_successfully`.
+
+This replaced an earlier design where every backend container migrated on startup — fine
+with one instance, but with N replicas it becomes N processes racing the same database on
+every deploy. The job maps directly onto a Kubernetes `initContainer` or an ECS one-off
+task.
+
+---
+
+## 14. Requirement traceability
+
+| # | Requirement | Implementation | Verified |
+|---|---|---|:--:|
+| 1 | React app to enter a URL | `ShortenForm.tsx` | ✅ |
+| 2 | Submitting returns a shortened URL | `POST /links` → `LinksService.create` | ✅ |
+| 3 | Record saved to a database | Prisma `Link` model, PostgreSQL | ✅ |
+| 4 | Slug is unique | Unique index + race-free retry | ✅ |
+| 5 | Short URL redirects to the stored URL | `app/[slug]/page.tsx` → 307 | ✅ |
+| 6 | Invalid slug shows a 404 page | `not-found.tsx` | ✅ |
+| 7 | List of all URLs in the database | `/links`, `GET /links` | ✅ |
+| 8 | Accounts; users see their own URLs | JWT auth, `?mineOnly=true` | ✅ |
+| 9 | URL validated as an actual URL | `validateUrl` (WHATWG parser) | ✅ |
+| 10 | Error message when invalid | Inline field errors | ✅ |
+| 11 | Easy clipboard copy | `CopyButton` + `useClipboard` | ✅ |
+| 12 | Users can modify their slug | `EditSlugModal` → `PATCH /links/:id` | ✅ |
+| 13 | Visits tracked | `Visit` rows + atomic counter | ✅ |
+| 14 | Rate limiting | Tiered, proxy-aware throttling | ✅ |
+| 15 | Dashboard showing popularity | `/dashboard` | ✅ |
+| 16 | Docker image | Multi-stage Dockerfiles + compose | ✅ |
+| 17 | React with TypeScript | Strict mode, no `any` | ✅ |
+| 18 | Node.js with TypeScript | NestJS, strict mode | ✅ |
+
+---
+
+## 15. Known limitations and what I would do next
+
+Stated honestly — each is a deliberate scope decision, not an oversight.
+
+**~~Rate-limit state is in-memory.~~ Resolved.** Counters now live in Redis when
+`REDIS_URL` is set, so the limit holds across replicas (verified: 10 allowed and the rest
+`429` with 3 replicas, rather than 30). The in-memory store remains the default when
+`REDIS_URL` is unset, which keeps tests and local development dependency-free. See
+[`SCALING.md`](SCALING.md).
+
+**Analytics aggregates in application memory.** Fine for the volumes this will see, and it
+buys one query for five breakdowns. Past roughly a million visits per window it becomes the
+wrong trade; the fix is `GROUP BY` in SQL plus a nightly-rolled `daily_link_stats` summary
+table, leaving raw visits for drill-down only.
+
+**Visit writes are fire-and-forget.** This keeps redirects fast, but a crash between the
+redirect and the write loses that data point. At scale the write belongs on a queue (BullMQ,
+SQS) with a worker draining it.
+
+**Frontend and backend types are maintained by hand.** `frontend/src/lib/types.ts` mirrors the
+backend DTOs. A monorepo with a shared package — or generating a client from the OpenAPI
+document Nest already produces — would make drift impossible. For two apps, the build tooling
+seemed a worse trade than the duplication.
+
+**No end-to-end test suite.** The flows in [§12](#12-testing) were verified manually against
+the running stack. Playwright covering shorten → copy → redirect → dashboard would be the
+next addition, and is what I would write first if this were going into CI.
+
+**No refresh tokens.** A 7-day JWT simply expires and the user signs in again. Short-lived
+access tokens plus rotating refresh tokens would be the production answer.
+
+**Unique visitors are approximate.** Distinct IP hashes over-count users on rotating mobile
+IPs and under-count several people behind one NAT. A first-party cookie would be more
+accurate but carries consent obligations that a click-counter should not incur lightly.
+
+**No custom domains, QR codes, bulk import, or link folders.** All natural next features,
+none of them in the brief.
+
+---
+
+## Appendix: environment variables
+
+### Backend
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DATABASE_URL` | — | **Required.** Postgres connection string |
+| `NODE_ENV` | `development` | Enables production hardening |
+| `PORT` | `4000` | HTTP port |
+| `API_PREFIX` | `api/v1` | Route prefix |
+| `CORS_ORIGINS` | `http://localhost:3000` | Comma-separated allowed origins |
+| `PUBLIC_BASE_URL` | `http://localhost:3000` | Base used to build short URLs |
+| `JWT_SECRET` | dev value | **Required in production** (≥16 chars) |
+| `JWT_EXPIRES_IN` | `7d` | Token lifetime |
+| `BCRYPT_ROUNDS` | `10` | Password hashing cost |
+| `SLUG_LENGTH` | `7` | Generated slug length |
+| `MAX_SLUG_ATTEMPTS` | `5` | Collision retries |
+| `IP_HASH_SALT` | dev value | **Required in production** |
+| `RATE_LIMIT_WINDOW_MS` | `60000` | Window length |
+| `RATE_LIMIT_MAX` | `100` | General allowance |
+| `RATE_LIMIT_CREATE_MAX` | `10` | Link-creation allowance |
+| `RATE_LIMIT_AUTH_MAX` | `5` | Auth allowance |
+| `PRISMA_LOG_QUERIES` | `false` | Log every SQL statement |
+
+### Frontend
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `NEXT_PUBLIC_API_URL` | `http://localhost:4000/api/v1` | API base for **browser** code (build-time) |
+| `API_INTERNAL_URL` | falls back to the above | API base for **server** code |
+| `NEXT_PUBLIC_SHORT_DOMAIN` | `localhost:3000` | Cosmetic prefix in the slug field |

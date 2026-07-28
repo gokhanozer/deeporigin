@@ -1,0 +1,232 @@
+# =============================================================================
+# DeepOrigin URL Shortener — full stack.
+#
+#   docker compose up --build
+#
+#   Frontend / short links → http://localhost:3000
+#   API                    → http://localhost:4000/api/v1
+#   API docs (Swagger)     → http://localhost:4000/api/v1/docs
+#
+# Start-up ordering is enforced with health checks rather than plain `depends_on`:
+# a container being "started" says nothing about it being ready to serve, and
+# the backend would otherwise race Postgres and crash on its first query.
+# =============================================================================
+
+networks:
+  default:
+    name: deeporigin
+
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: shortener-postgres
+    restart: unless-stopped
+    environment:
+      # Values come from the gitignored `.env` beside this file, so no
+      # credential is ever committed. `${VAR:?message}` makes Compose abort with
+      # that message if the variable is missing, rather than silently starting a
+      # database with an empty password.
+      #
+      # NOTE: these are read ONLY when the data directory is empty (first
+      # `initdb`). Changing them against an existing volume has no effect —
+      # `docker compose down -v` is required to re-initialise.
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      # Keep this lower-case. Postgres folds unquoted identifiers to lower case,
+      # so a mixed-case name like `postgreSqlDB` has to be double-quoted in
+      # every psql command and admin tool that touches it.
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+    # Run Postgres on 5433 rather than its default 5432, so that ONE port number
+    # is used everywhere: inside the container, on the host, and in every
+    # connection string. This avoids colliding with any other Postgres already
+    # occupying 5432 on the host.
+    #
+    # The official image's entrypoint prepends `postgres` to any argument list
+    # starting with a dash, so this becomes `postgres -p 5433`.
+    command: ['-p', '${POSTGRES_PORT:-5433}']
+    ports:
+      # Exposed so you can inspect the database with psql or a GUI client.
+      # Remove this mapping in any real deployment.
+      # HOST:CONTAINER — the same number on both sides, because the server
+      # itself listens on POSTGRES_PORT (see `command:` above).
+      - '${POSTGRES_PORT:-5433}:${POSTGRES_PORT:-5433}'
+    volumes:
+      # Named volume, so data survives `docker compose down`.
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # `pg_isready` reports true readiness, not merely that the process exists.
+      # It defaults to 5432, so the port must be given explicitly.
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB} -p ${POSTGRES_PORT:-5433}',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # Redis — shared state across backend replicas
+  # ---------------------------------------------------------------------------
+  # Rate-limit counters live here rather than in each process's memory. With the
+  # in-memory store, N replicas each keep their own counters and a 10/min limit
+  # silently becomes 10N/min. (Later phases add the slug cache and the visit
+  # queue here too — see docs/SCALING.md.)
+  redis:
+    image: redis:7-alpine
+    container_name: shortener-redis
+    restart: unless-stopped
+    # `--appendonly no`: this data is a cache and a set of short-lived counters.
+    # Losing it on restart costs one rate-limit window, so paying for disk
+    # persistence on every write would be waste.
+    command: ['redis-server', '--appendonly', 'no', '--maxmemory-policy', 'allkeys-lru']
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  # Database migrations — a one-shot job, NOT part of the app's startup
+  # ---------------------------------------------------------------------------
+  # Previously every backend container ran `prisma migrate deploy` before
+  # booting. With N replicas that means N processes racing to migrate the same
+  # database on every deploy: slow, noisy, and crash-looping whichever replica
+  # loses. Running it exactly once, as a dedicated job the replicas wait on, is
+  # the pattern that maps onto a Kubernetes initContainer or an ECS one-off task.
+  migrate:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: shortener-migrate
+    # Run to completion once; never restart.
+    restart: 'no'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:${POSTGRES_PORT:-5433}/${POSTGRES_DB}?schema=public
+    command: ['npx', 'prisma', 'migrate', 'deploy']
+
+  # ---------------------------------------------------------------------------
+  # NestJS API — horizontally scalable
+  # ---------------------------------------------------------------------------
+  # Deliberately has NO container_name and NO published port. Both would pin a
+  # unique resource to a single container and make `--scale backend=3` fail.
+  # Compose auto-names replicas, and nginx (below) owns the host port.
+  #
+  #   docker compose up -d --scale backend=3
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        # Wait for Postgres to accept connections, not just to have started.
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        # Boot only after migrations have finished successfully, so no replica
+        # ever queries a schema that does not exist yet.
+        condition: service_completed_successfully
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      API_PREFIX: api/v1
+
+      # Assembled from the same .env values that initialise the database, so the
+      # credentials cannot drift apart. `postgres` is the compose service name,
+      # resolved over the project network, on the port Postgres actually listens
+      # on (set via its `command:`).
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:${POSTGRES_PORT:-5433}/${POSTGRES_DB}?schema=public
+
+      # Shared rate-limit counters. Without this every replica would keep its
+      # own, and the configured limits would be multiplied by the replica count.
+      REDIS_URL: redis://redis:6379
+
+      # Browser origin permitted to call the API.
+      CORS_ORIGINS: http://localhost:3000
+
+      # Short links are built against the FRONTEND origin, because the Next.js
+      # catch-all route is what serves `/{slug}`.
+      PUBLIC_BASE_URL: http://localhost:3000
+
+      # Also sourced from .env. Generate real values with:
+      #    openssl rand -base64 32
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      IP_HASH_SALT: ${IP_HASH_SALT:?set IP_HASH_SALT in .env}
+      JWT_EXPIRES_IN: 7d
+      BCRYPT_ROUNDS: 10
+
+      SLUG_LENGTH: 7
+      RATE_LIMIT_WINDOW_MS: 60000
+      RATE_LIMIT_MAX: 100
+      RATE_LIMIT_CREATE_MAX: 10
+      RATE_LIMIT_AUTH_MAX: 5
+    # No `ports:` — nginx owns the host port. Replicas still reach each other
+    # and the frontend over the project network on port 4000.
+    #
+    # No migration step here any more: the `migrate` service ran it once, and
+    # `depends_on` guarantees it finished before this container starts.
+    command: ['node', 'dist/main.js']
+
+  # ---------------------------------------------------------------------------
+  # Load balancer — the single host-facing entry point for the API
+  # ---------------------------------------------------------------------------
+  # Publishes 4000 and fans requests across every backend replica via Docker's
+  # embedded DNS. This is what lets the backend scale: only one container can
+  # own a published host port, so it cannot be the backend itself.
+  lb:
+    image: nginx:1.27-alpine
+    container_name: shortener-lb
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - '4000:4000'
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:4000/api/v1/health || exit 1']
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # Next.js frontend (also serves the short links)
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Build-time, because NEXT_PUBLIC_* is inlined into the client bundle.
+        # This URL is resolved by the visitor's BROWSER, so it is localhost —
+        # not the internal service name.
+        NEXT_PUBLIC_API_URL: http://localhost:4000/api/v1
+        NEXT_PUBLIC_SHORT_DOMAIN: localhost:3000
+    container_name: shortener-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_started
+    environment:
+      NODE_ENV: production
+      # Server-side calls (the [slug] resolver) travel over the compose network,
+      # so here the service name is correct and localhost would fail.
+      API_INTERNAL_URL: http://backend:4000/api/v1
+    ports:
+      - '3000:3000'
+
+volumes:
+  postgres-data:
+    driver: local

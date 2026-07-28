@@ -1,0 +1,48 @@
+{
+  "name": "deeporigin-url-shortener",
+  "version": "1.0.0",
+  "description": "Root convenience scripts for running the backend and frontend together.",
+  "license": "MIT",
+  "private": true,
+  "//": [
+    "This root manifest exists ONLY to run both apps with a single command.",
+    "",
+    "It deliberately does NOT declare npm workspaces. Workspaces would hoist",
+    "node_modules and move the lockfiles to the root, which would break both",
+    "Dockerfiles — each copies its own package.json + package-lock.json and runs",
+    "`npm ci` inside its own build context. Keeping the two apps independently",
+    "installable is what lets them build and deploy separately."
+  ],
+  "scripts": {
+    "//dev": "Starts Postgres, applies migrations, then runs both dev servers side by side. Ctrl+C stops both.",
+    "predev": "npm run db:up && npm run db:migrate",
+    "dev": "concurrently --names \"api,web\" --prefix-colors \"blue.bold,magenta.bold\" --kill-others-on-fail \"npm --prefix backend run start:dev\" \"npm --prefix frontend run dev\"",
+
+    "//setup": "One-time install of dependencies for both apps.",
+    "setup": "npm install && npm --prefix backend install && npm --prefix frontend install",
+
+    "//db": "Postgres runs in Docker even in local dev — no host install needed.",
+    "db:up": "docker compose up -d --wait postgres",
+    "db:down": "docker compose stop postgres",
+    "db:migrate": "npm --prefix backend run prisma:deploy",
+    "db:seed": "npm --prefix backend run db:seed",
+    "db:studio": "npm --prefix backend run prisma:studio",
+
+    "//docker": "Full stack in containers — the closest thing to production.",
+    "docker:up": "docker compose up --build",
+    "docker:up:detached": "docker compose up --build -d",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f",
+
+    "//quality": "Run across both apps.",
+    "build": "npm --prefix backend run build && npm --prefix frontend run build",
+    "test": "npm --prefix backend test",
+    "typecheck": "npm --prefix backend run typecheck && npm --prefix frontend run typecheck"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

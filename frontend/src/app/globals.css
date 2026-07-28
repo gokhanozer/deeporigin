@@ -1,0 +1,143 @@
+@import 'tailwindcss';
+
+/*
+ * Design tokens.
+ *
+ * Tailwind v4 reads its theme from CSS rather than a JS config file. Declaring
+ * the palette here means `bg-surface`, `text-muted` and friends are available
+ * as ordinary utilities, and the whole look can be retuned from one block.
+ *
+ * The app commits to a single dark theme: a focused, product-like surface that
+ * makes the charts read clearly. Contrast ratios for text on `--color-surface`
+ * meet WCAG AA.
+ */
+@theme {
+  /* Backgrounds, from furthest back to closest. */
+  --color-canvas: #0b0f19;
+  --color-surface: #121826;
+  --color-surface-raised: #1a2234;
+  --color-border: #263149;
+  --color-border-strong: #35425f;
+
+  /* Text. */
+  --color-content: #e8ecf6;
+  --color-muted: #96a2bd;
+  --color-subtle: #6b7796;
+
+  /* Brand — the indigo of the mock-up's "Shorten" button. */
+  --color-brand: #6366f1;
+  --color-brand-hover: #818cf8;
+  --color-brand-soft: #4338ca;
+
+  /* Status. */
+  --color-success: #34d399;
+  --color-danger: #fb7185;
+  --color-warning: #fbbf24;
+
+  /* Categorical series colours for charts.
+   *
+   * These are NOT the brand indigo: chart marks and UI chrome have different
+   * jobs. The set below is stepped for a dark surface and was checked with a
+   * palette validator against #121826 — lightness band, chroma floor,
+   * colour-vision-deficiency separation (worst adjacent ΔE 8.4 protan),
+   * normal-vision separation (worst adjacent ΔE 19.3) and ≥3:1 contrast all
+   * pass. An earlier indigo/sky-based set failed the normal-vision floor at
+   * ΔE 13.5, which is why it was replaced.
+   *
+   * Assign these in fixed order — never cycle them, and never re-assign by
+   * rank, or a filtered chart repaints its surviving series.
+   */
+  --color-series-1: #3987e5; /* blue    */
+  --color-series-2: #d95926; /* orange  */
+  --color-series-3: #199e70; /* aqua    */
+  --color-series-4: #c98500; /* yellow  */
+  --color-series-5: #d55181; /* magenta */
+  --color-series-6: #008300; /* green   */
+
+  --radius-card: 0.875rem;
+}
+
+/* ---------------------------------------------------------------------------
+ * Base layer
+ * ------------------------------------------------------------------------ */
+@layer base {
+  html {
+    /* Anchors and skip-links scroll smoothly, unless the user prefers not to. */
+    scroll-behavior: smooth;
+  }
+
+  body {
+    background-color: var(--color-canvas);
+    color: var(--color-content);
+    font-family:
+      ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* A single, consistent focus ring everywhere — keyboard users always know
+     where they are. Never remove this without providing a replacement. */
+  :focus-visible {
+    outline: 2px solid var(--color-brand-hover);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  /* Respect the OS "reduce motion" setting. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * Animations
+ * ------------------------------------------------------------------------ */
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.animate-toast-in {
+  animation: toast-in 180ms ease-out;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 220ms ease-out;
+}
+
+/* Subtle ambient gradient behind the hero, for depth without distraction. */
+.hero-glow {
+  background-image:
+    radial-gradient(60rem 30rem at 50% -20%, rgba(99, 102, 241, 0.18), transparent 70%),
+    radial-gradient(40rem 20rem at 85% 10%, rgba(56, 189, 248, 0.1), transparent 70%);
+}
+
+/* Utility for URLs, which have no spaces and would otherwise overflow. */
+.break-anywhere {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}

@@ -1,0 +1,111 @@
+// ---------------------------------------------------------------------------
+// Prisma schema for the DeepOrigin URL shortener.
+//
+// Three entities model the whole domain:
+//
+//   User  ──1:N──▶ Link ──1:N──▶ Visit
+//
+//   • User  — an optional account. Links can also be created anonymously
+//             (ownerId = NULL), which keeps the "paste and shorten" flow on the
+//             landing page frictionless, exactly like the task mock-up.
+//   • Link  — the shortened URL itself: a unique `slug` pointing at a
+//             `targetUrl`, owned by a user or by nobody.
+//   • Visit — one row per redirect served. Kept as raw events (rather than only
+//             a counter) so the analytics dashboard can slice by day, referrer
+//             and device without losing information.
+//
+// `Link.visitCount` is a denormalised counter maintained alongside the Visit
+// rows. Reading a single integer keeps list endpoints fast, while the Visit
+// table remains the source of truth for time-series charts.
+// ---------------------------------------------------------------------------
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// A registered account. Optional: the shortener works without signing up.
+model User {
+  /// Surrogate primary key (UUID rather than a serial, so IDs are not guessable).
+  id           String   @id @default(uuid())
+  /// Login identifier. Stored lower-cased and trimmed by the auth service.
+  email        String   @unique
+  /// bcrypt hash — never the plaintext password.
+  passwordHash String
+  /// Optional friendly name shown in the UI header.
+  displayName  String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  /// Every link this user has created.
+  links Link[]
+
+  @@map("users")
+}
+
+/// A single shortened URL.
+model Link {
+  id           String    @id @default(uuid())
+  /// The public short code, e.g. `abc123` in https://{domain}/abc123.
+  /// A unique index enforces the "slug must be unique" requirement at the
+  /// database level, so two concurrent inserts can never collide silently.
+  slug         String    @unique
+  /// The destination the slug redirects to (normalised absolute http/https URL).
+  targetUrl    String
+  /// Optional human label to make long lists scannable.
+  title        String?
+  /// True when the user chose the slug themselves rather than it being generated.
+  isCustomSlug Boolean   @default(false)
+  /// Denormalised redirect counter — see the header note above.
+  visitCount   Int       @default(0)
+  /// Timestamp of the most recent redirect, or NULL if never visited.
+  lastVisitedAt DateTime?
+  /// Soft-disable switch: an inactive link 404s instead of redirecting.
+  isActive     Boolean   @default(true)
+  /// Optional expiry. After this instant the link stops resolving.
+  expiresAt    DateTime?
+  /// NULL for anonymous links.
+  ownerId      String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  owner  User?   @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  visits Visit[]
+
+  /// Supports "my links, newest first" without a sort pass.
+  @@index([ownerId, createdAt])
+  /// Supports the "most popular links" dashboard query.
+  @@index([visitCount])
+  @@map("links")
+}
+
+/// One redirect event. Written on every successful slug resolution.
+model Visit {
+  id         String   @id @default(uuid())
+  linkId     String
+  occurredAt DateTime @default(now())
+  /// Salted SHA-256 of the client IP. Hashing keeps unique-visitor counts
+  /// possible while avoiding storage of raw personal data.
+  ipHash     String?
+  /// Raw User-Agent, retained for debugging and future parsing improvements.
+  userAgent  String?
+  /// Derived from the User-Agent at write time so reads stay cheap.
+  browser    String?
+  os         String?
+  /// One of: desktop | mobile | tablet | bot | unknown.
+  deviceType String?
+  /// Referring host (e.g. `t.co`), or NULL for direct traffic.
+  referrer   String?
+
+  link Link @relation(fields: [linkId], references: [id], onDelete: Cascade)
+
+  /// Primary access pattern: "all visits for link X within a date range".
+  @@index([linkId, occurredAt])
+  /// Supports the global "visits over time" chart.
+  @@index([occurredAt])
+  @@map("visits")
+}
