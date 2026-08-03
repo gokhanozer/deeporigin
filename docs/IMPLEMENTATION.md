@@ -24,8 +24,7 @@ are stated along with the conditions under which the other option would win.
 12. [Observability](#12-observability)
 13. [Testing](#13-testing)
 14. [Docker and deployment](#14-docker-and-deployment)
-15. [Requirement traceability](#15-requirement-traceability)
-16. [Known limitations and next steps](#16-known-limitations-and-next-steps)
+15. [Known limitations and next steps](#15-known-limitations-and-next-steps)
 
 ---
 
@@ -98,7 +97,7 @@ Owner sees the click on the dashboard
 ```
 
 The API tier is horizontally scalable, though that is **opt-in**: the default
-`docker compose up -d` runs the single-instance stack above. Layering on
+`docker compose up --build` runs the single-instance stack above. Layering on
 `docker-compose.scale.yml` clears the backend's port mapping and adds nginx, and
 the shape becomes:
 
@@ -193,46 +192,10 @@ dependency-free.)*
 User  ──1:N──▶  Link  ──1:N──▶  Visit
 ```
 
-### `users`
-
-| Column | Type | Notes |
-|---|---|---|
-| `id` | `uuid` PK | UUID, not serial — IDs appear in URLs and must not be guessable or countable |
-| `email` | `text` UNIQUE | Stored lower-cased and trimmed |
-| `passwordHash` | `text` | bcrypt hash; the plaintext is never persisted |
-| `displayName` | `text?` | Optional |
-
-### `links`
-
-| Column | Type | Notes |
-|---|---|---|
-| `id` | `uuid` PK | |
-| `slug` | `text` **UNIQUE** | The uniqueness requirement, enforced by the database |
-| `targetUrl` | `text` | Normalised absolute http(s) URL |
-| `title` | `text?` | Optional label |
-| `isCustomSlug` | `bool` | Whether the user chose the slug |
-| `visitCount` | `int` | **Denormalised** counter — see below |
-| `lastVisitedAt` | `timestamp?` | |
-| `isActive` | `bool` | Soft disable without deleting |
-| `expiresAt` | `timestamp?` | Optional expiry |
-| `ownerId` | `uuid?` | **NULL for anonymous links** |
-
-Indexes: `(ownerId, createdAt)` for "my links, newest first"; `(visitCount)` for the
-popularity ranking; plus the unique index on `slug`.
-
-### `visits`
-
-| Column | Type | Notes |
-|---|---|---|
-| `id` | `uuid` PK | |
-| `linkId` | `uuid` FK | `ON DELETE CASCADE` |
-| `occurredAt` | `timestamp` | |
-| `ipHash` | `text?` | **Salted SHA-256, never the raw IP** |
-| `userAgent` | `text?` | Retained for future parsing improvements |
-| `browser` / `os` / `deviceType` | `text?` | Derived at write time so reads stay cheap |
-| `referrer` | `text?` | Referring **host** only |
-
-Indexes: `(linkId, occurredAt)` for per-link windows; `(occurredAt)` for the global trend.
+The exact columns and indexes live in
+[`REFERENCE.md` → Database schema](REFERENCE.md#database-schema), so there is one
+lookup table for the contract. This section focuses on the design choices behind
+that shape.
 
 ### Two decisions worth explaining
 
@@ -805,7 +768,8 @@ TypeScript, rather than issuing five separate `GROUP BY` queries. The reasoning:
 - the query is bounded by an indexed date window, so the row count scales with recent
   traffic rather than with table size.
 
-At genuinely large volumes this becomes the wrong trade — see [§16](#16-known-limitations-and-what-i-would-do-next).
+At genuinely large volumes this becomes the wrong trade — see
+[§15](#15-known-limitations-and-next-steps).
 
 Every dashboard query runs inside one transaction, so every number on screen describes the
 same instant.
@@ -951,27 +915,18 @@ roadmap cannot drift apart.
 
 The instrumentation ships in the **base image** — exposing metrics is part of the
 application. The stack that *collects* them is an opt-in overlay, on the same
-reasoning as `docker-compose.scale.yml`: someone running `docker compose up`
+reasoning as `docker-compose.scale.yml`: someone running `docker compose up --build`
 should get an application, not a monitoring platform.
 
-```bash
-docker compose -f docker-compose.yml \
-               -f docker-compose.observability.yml up -d
-```
+For local Observability Mode commands, URLs, and container lists, see
+[`README.md` → How to Run Locally](../README.md#how-to-run-locally).
 
-| | |
-|---|---|
-| Prometheus | <http://localhost:9090> — targets, alerts, raw PromQL |
-| Grafana | <http://localhost:3001> — `admin` / `admin` |
-
-Composable with the scaling overlay to watch several replicas at once.
-
-**Grafana ships with the datasource provisioned but no dashboards.** Wiring
+**Grafana ships with the datasource and dashboard provisioning in git.** Wiring
 Grafana to Prometheus by hand is setup friction with no insight in it, so it is
-automated; building panels is the interesting part and is left to whoever is
-exploring. `Explore` works on first launch.
+automated. The overview dashboard is provisioned from
+`observability/grafana/provisioning/dashboards/shortener-overview.json`.
 
-### Notes
+### Operational Considerations
 
 **`/metrics` should not be public.** The exposition reveals route names, traffic
 volume and internal timings — useful reconnaissance. It is served on the main
@@ -995,12 +950,12 @@ OpenTelemetry spans would be the next addition, and are not built.
 
 ## 13. Testing
 
-**246 unit tests across 18 suites, all passing** — and they need no database or
-Redis, which is why the whole run takes a few seconds.
+**Jest reports 253 backend tests across 18 suites** — and they need no database
+or Redis, which is why the whole run takes a few seconds.
 
 ```
-Test Suites: 18 passed, 18 total
-Tests:       246 passed, 246 total
+Test Suites: 18 total
+Tests:       253 total
 ```
 
 | Suite | Covers |
@@ -1110,32 +1065,7 @@ queries, `directUrl` straight to Postgres for migrations and seeding.
 
 ---
 
-## 15. Requirement traceability
-
-| # | Requirement | Implementation | Verified |
-|---|---|---|:--:|
-| 1 | React app to enter a URL | `ShortenForm.tsx` | ✅ |
-| 2 | Submitting returns a shortened URL | `POST /links` → `LinksService.create` | ✅ |
-| 3 | Record saved to a database | Prisma `Link` model, PostgreSQL | ✅ |
-| 4 | Slug is unique | Unique index + race-free retry | ✅ |
-| 5 | Short URL redirects to the stored URL | `app/[slug]/page.tsx` → 307 | ✅ |
-| 6 | Invalid slug shows a 404 page | `not-found.tsx` | ✅ |
-| 7 | List of all URLs in the database | `/links`, `GET /links` | ✅ |
-| 8 | Accounts; users see their own URLs | JWT auth, `?mineOnly=true` | ✅ |
-| 9 | URL validated as an actual URL | `validateUrl` (WHATWG parser) | ✅ |
-| 10 | Error message when invalid | Inline field errors | ✅ |
-| 11 | Easy clipboard copy | `CopyButton` + `useClipboard` | ✅ |
-| 12 | Users can modify their slug | `EditSlugModal` → `PATCH /links/:id` | ✅ |
-| 13 | Visits tracked | `Visit` rows + atomic counter | ✅ |
-| 14 | Rate limiting | Tiered, proxy-aware throttling | ✅ |
-| 15 | Dashboard showing popularity | `/dashboard` | ✅ |
-| 16 | Docker image | Multi-stage Dockerfiles + compose | ✅ |
-| 17 | React with TypeScript | Strict mode, no `any` | ✅ |
-| 18 | Node.js with TypeScript | NestJS, strict mode | ✅ |
-
----
-
-## 16. Known limitations and next steps
+## 15. Known limitations and next steps
 
 Each is a scope decision, with the change that would resolve it.
 
@@ -1159,9 +1089,9 @@ backend DTOs. A monorepo with a shared package — or generating a client from t
 document Nest already produces — would make drift impossible. For two apps, the build tooling
 seemed a worse trade than the duplication.
 
-**No end-to-end test suite.** The flows in [§13](#13-testing) were verified manually against
-the running stack. Playwright covering shorten → copy → redirect → dashboard would be the
-next addition, and the first thing to write before this goes into CI.
+**No browser end-to-end test suite.** The flows in [§13](#13-testing) were verified
+manually against the running stack. Playwright covering shorten → copy → redirect →
+dashboard would be the next addition, and the first thing to write before this goes into CI.
 
 **No refresh tokens.** A 7-day JWT simply expires and the user signs in again. Short-lived
 access tokens plus rotating refresh tokens would be the production answer.
