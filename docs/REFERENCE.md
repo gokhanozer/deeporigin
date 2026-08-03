@@ -2,7 +2,8 @@
 
 Lookup tables. Nothing here explains *why* — see
 [`IMPLEMENTATION.md`](IMPLEMENTATION.md) for reasoning and
-[`DEVELOPER_GUIDE.md`](DEVELOPER_GUIDE.md) to get running.
+[`README.md`](../README.md) to get running. Use
+[`DEVELOPER_GUIDE.md`](DEVELOPER_GUIDE.md) when changing code.
 
 1. [Environment variables](#environment-variables)
 2. [API endpoints](#api-endpoints)
@@ -201,14 +202,14 @@ User  ──1:N──▶  Link  ──1:N──▶  Visit
 | `links` | `links_createdAt_id_idx` | List sorted newest/oldest first — the default view |
 | `links` | `links_visitCount_id_idx` | List sorted by most visited |
 | `links` | `links_lastVisitedAt_id_idx` | List sorted by recently visited |
+| `users` | `users_email_key` **UNIQUE** | Login |
+| `visits` | `visits_linkId_occurredAt_idx` | Per-link analytics windows |
+| `visits` | `visits_occurredAt_idx` | Global visits-over-time |
 
 > The three `*_id_idx` indexes lead **descending** and end in `id`. Both matter:
 > `buildOrderBy` emits `ORDER BY <col> DESC, id ASC`, and an index missing
 > either property is not used. See [`SCALING.md` §2.5](SCALING.md) for the
 > measurements.
-| `users` | `users_email_key` **UNIQUE** | Login |
-| `visits` | `visits_linkId_occurredAt_idx` | Per-link analytics windows |
-| `visits` | `visits_occurredAt_idx` | Global visits-over-time |
 
 ---
 
@@ -371,10 +372,10 @@ sum(pgbouncer_pools_client_waiting_connections)
 
 | Port | Service | Mode |
 |---|---|---|
-| `3000` | Frontend + short links | all |
-| `4000` | API (or nginx in scaled mode) | all |
-| `5433` | PostgreSQL | all |
-| `6432` | PgBouncer | internal only |
-| `6379` | Redis | internal only |
-| `3001` | Grafana | observability |
-| `9090` | Prometheus | observability |
+| `3000` | Frontend + short links | Base, Scale, Observability, Compound |
+| `4000` | API, or nginx in Scale mode | Base, Scale, Observability, Compound |
+| `5433` | PostgreSQL | Base, Scale, Observability, Compound |
+| `6432` | PgBouncer | Internal only |
+| `6379` | Redis | Internal only |
+| `3001` | Grafana | Observability, Compound |
+| `9090` | Prometheus | Observability, Compound |
