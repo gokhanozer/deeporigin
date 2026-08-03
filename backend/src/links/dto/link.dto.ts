@@ -144,10 +144,21 @@ export class ListLinksQueryDto extends PaginationQueryDto {
   @IsIn(['asc', 'desc'], { message: 'sortOrder must be "asc" or "desc"' })
   sortOrder?: 'asc' | 'desc' = 'desc';
 
-  /** When true, restrict results to the authenticated user's own links. */
+  /**
+   * When true, restrict results to the authenticated user's own links.
+   *
+   * ⚠️ Do NOT add `@Type(() => Boolean)` here. Query-string values arrive as
+   * strings, and `Boolean('false')` is **`true`** — every non-empty string is
+   * truthy. With `@Type` in place, `?mineOnly=false` was parsed as `true`,
+   * which made the service reject anonymous requests with
+   * `403 You must be signed in to view your links` — the exact opposite of what
+   * the caller asked for.
+   *
+   * `@Transform` alone is correct: it inspects the raw value and only the
+   * literal string `'true'` (or a real boolean `true`) enables the filter.
+   */
   @ApiPropertyOptional({ default: false })
   @IsOptional()
-  @Type(() => Boolean)
   @Transform(({ value }) => value === true || value === 'true')
   @IsBoolean()
   mineOnly?: boolean = false;
