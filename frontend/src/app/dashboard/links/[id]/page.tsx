@@ -24,13 +24,10 @@ import { useAsyncData } from '../../../../hooks/useAsync';
 import { getLinkAnalytics } from '../../../../lib/api/analytics';
 import { formatDate, formatRelativeTime, stripProtocol } from '../../../../lib/format';
 import { useToast } from '../../../../providers/ToastProvider';
-
-/** Selectable look-back windows. */
-const PERIOD_OPTIONS: ReadonlyArray<{ days: number; label: string }> = [
-  { days: 7, label: '7 days' },
-  { days: 30, label: '30 days' },
-  { days: 90, label: '90 days' },
-];
+import {
+  ANALYTICS_PERIODS,
+  DEFAULT_ANALYTICS_PERIOD_DAYS,
+} from '../../../../lib/analytics-periods';
 
 /**
  * Renders the analytics page for one link.
@@ -41,7 +38,7 @@ export default function LinkAnalyticsPage(): React.JSX.Element {
   const params = useParams<{ id: string }>();
   const linkId = params.id;
   const { showSuccess } = useToast();
-  const [days, setDays] = useState(30);
+  const [days, setDays] = useState(DEFAULT_ANALYTICS_PERIOD_DAYS);
 
   const fetchAnalytics = useCallback(
     () => getLinkAnalytics(linkId, days),
@@ -118,7 +115,7 @@ export default function LinkAnalyticsPage(): React.JSX.Element {
               role="group"
               aria-label="Select time period"
             >
-              {PERIOD_OPTIONS.map((option) => (
+              {ANALYTICS_PERIODS.map((option) => (
                 <button
                   key={option.days}
                   type="button"

@@ -20,13 +20,13 @@ import { TopLinksTable } from '../../components/links/TopLinksTable';
 import { useAsyncData } from '../../hooks/useAsync';
 import { getOverview } from '../../lib/api/analytics';
 import { useAuth } from '../../providers/AuthProvider';
-
-/** Selectable look-back windows. */
-const PERIOD_OPTIONS: ReadonlyArray<{ days: number; label: string }> = [
-  { days: 7, label: '7 days' },
-  { days: 30, label: '30 days' },
-  { days: 90, label: '90 days' },
-];
+import {
+  ANALYTICS_PERIODS,
+  DEFAULT_ANALYTICS_PERIOD_DAYS,
+  SCOPE_OPTIONS,
+  type LinkScope,
+} from '../../lib/analytics-periods';
+import { SegmentedToggle } from '../../components/ui/SegmentedToggle';
 
 /**
  * Renders the dashboard.
@@ -35,10 +35,20 @@ const PERIOD_OPTIONS: ReadonlyArray<{ days: number; label: string }> = [
  */
 export default function DashboardPage(): React.JSX.Element {
   const { isAuthenticated, initializing } = useAuth();
-  const [days, setDays] = useState(30);
+  const [days, setDays] = useState(DEFAULT_ANALYTICS_PERIOD_DAYS);
+  // Defaults to 'mine': a signed-in user opening their dashboard is asking
+  // about their own links. Anonymous callers never see the switch.
+  const [scope, setScope] = useState<LinkScope>('mine');
 
-  const fetchOverview = useCallback(() => getOverview(days), [days]);
-  const { data, loading, error } = useAsyncData(fetchOverview, [days, isAuthenticated]);
+  const showScope = isAuthenticated;
+  const mineOnly = showScope && scope === 'mine';
+
+  const fetchOverview = useCallback(() => getOverview(days, mineOnly), [days, mineOnly]);
+  const { data, loading, error } = useAsyncData(fetchOverview, [
+    days,
+    mineOnly,
+    isAuthenticated,
+  ]);
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-10 sm:px-6">
@@ -49,32 +59,33 @@ export default function DashboardPage(): React.JSX.Element {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-content">Dashboard</h1>
           <p className="mt-1 text-sm text-muted">
-            {data?.scopedToUser
-              ? 'How your links are performing.'
-              : 'Public totals across every link. Sign in to see just your own.'}
+            {!isAuthenticated
+              ? 'Public totals across every link. Sign in to see just your own.'
+              : data?.scopedToUser
+                ? 'How your links are performing.'
+                : 'Public totals across every link.'}
           </p>
         </div>
 
-        <div
-          className="flex rounded-lg border border-border bg-surface p-1"
-          role="group"
-          aria-label="Select time period"
-        >
-          {PERIOD_OPTIONS.map((option) => (
-            <button
-              key={option.days}
-              type="button"
-              onClick={() => setDays(option.days)}
-              aria-pressed={days === option.days}
-              className={`rounded-md px-3 py-1.5 text-sm transition-colors ${
-                days === option.days
-                  ? 'bg-surface-raised text-content'
-                  : 'text-muted hover:text-content'
-              }`}
-            >
-              {option.label}
-            </button>
-          ))}
+        <div className="flex flex-wrap items-center gap-2">
+          {showScope && (
+            <SegmentedToggle
+              options={SCOPE_OPTIONS}
+              value={scope}
+              onChange={setScope}
+              ariaLabel="Scope the figures by owner"
+            />
+          )}
+
+          <SegmentedToggle
+            options={ANALYTICS_PERIODS.map((option) => ({
+              value: option.days,
+              label: option.label,
+            }))}
+            value={days}
+            onChange={setDays}
+            ariaLabel="Select time period"
+          />
         </div>
       </header>
 
@@ -156,9 +167,13 @@ export default function DashboardPage(): React.JSX.Element {
           {/* ---- Full list ---- */}
           {isAuthenticated && (
             <LinkList
-              title="Your links"
-              mineOnly
-              emptyMessage="You haven’t created any links yet."
+              title={mineOnly ? 'Your links' : 'All links'}
+              mineOnly={mineOnly}
+              emptyMessage={
+                mineOnly
+                  ? 'You haven’t created any links yet.'
+                  : 'Nothing has been shortened yet.'
+              }
             />
           )}
         </div>

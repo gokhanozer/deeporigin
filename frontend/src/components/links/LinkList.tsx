@@ -11,7 +11,7 @@
  * so the two views can never drift apart.
  */
 
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Card } from '../ui/Card';
 import { Button } from '../ui/Button';
 import { Input } from '../ui/Input';
@@ -23,11 +23,26 @@ import { useDebouncedValue } from '../../hooks/useDebouncedValue';
 import { deleteLink, listLinks } from '../../lib/api/links';
 import { formatNumber, pluralize } from '../../lib/format';
 import { useToast } from '../../providers/ToastProvider';
+import { useAuth } from '../../providers/AuthProvider';
 import type { Link, LinkSortField } from '../../lib/types';
+import { SCOPE_OPTIONS, type LinkScope } from '../../lib/analytics-periods';
+import { SegmentedToggle } from '../ui/SegmentedToggle';
 
 export interface LinkListProps {
-  /** Restrict to the signed-in user's own links. */
+  /**
+   * Restrict to the signed-in user's own links.
+   *
+   * Ignored when {@link LinkListProps.showScopeToggle} is set, since the toggle
+   * then owns the scope.
+   */
   mineOnly?: boolean;
+  /**
+   * Offer an "All links / My links" switch.
+   *
+   * Only rendered for signed-in users — an anonymous visitor has no "mine" to
+   * show, and the API rejects `mineOnly` without a token anyway.
+   */
+  showScopeToggle?: boolean;
   /** Heading above the list. */
   title?: string;
   /** Message shown when the list is empty. */
@@ -60,16 +75,45 @@ const PAGE_SIZE = 10;
  */
 export function LinkList({
   mineOnly = false,
+  showScopeToggle = false,
   title = 'Links',
   emptyMessage = 'No links yet. Shorten one to get started.',
   refreshToken = 0,
 }: LinkListProps): React.JSX.Element {
   const { showSuccess, showError } = useToast();
+  const { isAuthenticated } = useAuth();
 
   const [search, setSearch] = useState('');
   const [sortValue, setSortValue] = useState('newest');
   const [page, setPage] = useState(1);
   const [editing, setEditing] = useState<Link | null>(null);
+  const [scope, setScope] = useState<LinkScope>('all');
+
+  // The toggle is only offered to signed-in users, so it can only take control
+  // of the scope for them. Everyone else keeps the caller's `mineOnly`.
+  const toggleActive = showScopeToggle && isAuthenticated;
+  const requestedMineOnly = toggleActive ? scope === 'mine' : mineOnly;
+
+  // Clamped to the auth state, unconditionally. `GET /links?mineOnly=true`
+  // without a token is a 403, and there is no arrangement of props or timing in
+  // which asking for it is correct — so the component refuses to, rather than
+  // trusting every caller to guard it.
+  //
+  // This closes a real gap: a caller passing `mineOnly={isAuthenticated}` looks
+  // safe, but the value is captured while auth is still resolving, and a token
+  // that the API later rejects (expired, or belonging to a user deleted by a
+  // database reset) leaves the client believing it is signed in while the
+  // server treats the request as anonymous.
+  const effectiveMineOnly = requestedMineOnly && isAuthenticated;
+
+  // Signing out while viewing "My links" would otherwise leave the list asking
+  // for a scope the API rejects with 403. Fall back to "all".
+  useEffect(() => {
+    if (!isAuthenticated && scope === 'mine') {
+      setScope('all');
+      setPage(1);
+    }
+  }, [isAuthenticated, scope]);
 
   const debouncedSearch = useDebouncedValue(search, 350);
   const sort = SORT_OPTIONS.find((option) => option.value === sortValue) ?? SORT_OPTIONS[0];
@@ -82,16 +126,16 @@ export function LinkList({
         search: debouncedSearch || undefined,
         sortBy: sort.sortBy,
         sortOrder: sort.sortOrder,
-        mineOnly,
+        mineOnly: effectiveMineOnly,
       }),
-    [page, debouncedSearch, sort.sortBy, sort.sortOrder, mineOnly],
+    [page, debouncedSearch, sort.sortBy, sort.sortOrder, effectiveMineOnly],
   );
 
   const { data, loading, error, refetch } = useAsyncData(fetchLinks, [
     page,
     debouncedSearch,
     sortValue,
-    mineOnly,
+    effectiveMineOnly,
     refreshToken,
   ]);
 
@@ -132,13 +176,23 @@ export function LinkList({
   const links = data?.data ?? [];
   const meta = data?.meta;
 
+  // When the toggle owns the scope, the heading and empty state must follow it —
+  // otherwise "All links / 0 links" would show while viewing an empty "My links".
+  const heading = toggleActive
+    ? (SCOPE_OPTIONS.find((option) => option.value === scope)?.label ?? title)
+    : title;
+  const emptyText =
+    toggleActive && scope === 'mine'
+      ? 'You haven’t created any links yet. Shorten one and it will appear here.'
+      : emptyMessage;
+
   return (
     <>
       <Card flush>
         {/* ---- Header and controls ---- */}
         <div className="flex flex-col gap-3 border-b border-border/70 p-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <h2 className="text-sm font-semibold text-content">{title}</h2>
+            <h2 className="text-sm font-semibold text-content">{heading}</h2>
             {meta && (
               <p className="mt-0.5 text-xs text-subtle">
                 {formatNumber(meta.total)} {pluralize(meta.total, 'link')}
@@ -146,7 +200,21 @@ export function LinkList({
             )}
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {/*
+              Scope switch. Rendered only for signed-in users: an anonymous
+              visitor has no "mine", and the API returns 403 for `mineOnly`
+              without a token — so offering it would be a dead control.
+            */}
+            {toggleActive && (
+              <SegmentedToggle
+                options={SCOPE_OPTIONS}
+                value={scope}
+                onChange={(next) => handleFilterChange(() => setScope(next))}
+                ariaLabel="Filter links by owner"
+              />
+            )}
+
             <div className="w-full sm:w-56">
               <Input
                 type="search"
@@ -185,7 +253,7 @@ export function LinkList({
           <EmptyState
             icon="🔗"
             title={debouncedSearch ? 'No matching links' : 'No links yet'}
-            description={debouncedSearch ? 'Try a different search term.' : emptyMessage}
+            description={debouncedSearch ? 'Try a different search term.' : emptyText}
           />
         ) : (
           <ul>

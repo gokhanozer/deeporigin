@@ -3,8 +3,8 @@
  */
 
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
-import { IsInt, IsOptional, Max, Min } from 'class-validator';
+import { Transform, Type } from 'class-transformer';
+import { IsBoolean, IsInt, IsOptional, Max, Min } from 'class-validator';
 import {
   DEFAULT_ANALYTICS_DAYS,
   MAX_ANALYTICS_DAYS,
@@ -21,6 +21,27 @@ export class AnalyticsQueryDto {
   @Min(1, { message: 'days must be at least 1' })
   @Max(MAX_ANALYTICS_DAYS, { message: `days cannot exceed ${MAX_ANALYTICS_DAYS}` })
   days?: number = DEFAULT_ANALYTICS_DAYS;
+
+  /**
+   * Restrict the figures to the caller's own links.
+   *
+   * Defaults to **true**, which preserves the previous behaviour: a signed-in
+   * caller sees their own numbers. Passing `false` opts into the public,
+   * system-wide view while staying authenticated — which is what the
+   * dashboard's "All links / My links" switch sends.
+   *
+   * Ignored for anonymous callers, who can only ever see public totals.
+   *
+   * ⚠️ `@Transform` only — never `@Type(() => Boolean)`. Query values arrive as
+   * strings and `Boolean('false')` is `true`, which silently inverts the flag.
+   * That exact bug shipped in `ListLinksQueryDto` and caused 403s; see
+   * `links/dto/link.dto.spec.ts`.
+   */
+  @ApiPropertyOptional({ default: true, description: 'Scope figures to the caller’s own links' })
+  @IsOptional()
+  @Transform(({ value }) => value !== false && value !== 'false')
+  @IsBoolean()
+  mineOnly?: boolean = true;
 }
 
 /** One point in a daily time-series. */

@@ -31,7 +31,7 @@ export class AnalyticsController {
     @Query() query: AnalyticsQueryDto,
     @CurrentUser('id') userId?: string,
   ): Promise<AnalyticsOverviewDto> {
-    return this.analyticsService.getOverview(query.days, userId);
+    return this.analyticsService.getOverview(query.days, userId, query.mineOnly);
   }
 
   /**

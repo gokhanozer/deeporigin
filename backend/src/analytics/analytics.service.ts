@@ -76,12 +76,20 @@ export class AnalyticsService {
   async getOverview(
     days = DEFAULT_ANALYTICS_DAYS,
     userId?: string,
+    mineOnly = true,
   ): Promise<AnalyticsOverviewDto> {
     const since = daysAgo(days);
-    const linkWhere: Prisma.LinkWhereInput = userId ? { ownerId: userId } : {};
+
+    // Scoping requires BOTH an identity and the caller asking for it. A
+    // signed-in user can therefore opt into the public view (`mineOnly=false`)
+    // without signing out — which is what the dashboard's scope switch does.
+    const scopeToUser = Boolean(userId) && mineOnly;
+    const ownerId = scopeToUser ? userId : undefined;
+
+    const linkWhere: Prisma.LinkWhereInput = ownerId ? { ownerId } : {};
     const visitWhere: Prisma.VisitWhereInput = {
       occurredAt: { gte: since },
-      ...(userId ? { link: { ownerId: userId } } : {}),
+      ...(ownerId ? { link: { ownerId } } : {}),
     };
 
     // One transaction: every number on the dashboard describes the same instant.
@@ -123,7 +131,7 @@ export class AnalyticsService {
       devices: toBreakdown(visits.map((v) => v.deviceType), visits.length, 'unknown'),
       browsers: toBreakdown(visits.map((v) => v.browser), visits.length, 'Unknown'),
       periodDays: days,
-      scopedToUser: Boolean(userId),
+      scopedToUser: scopeToUser,
     };
   }
 
