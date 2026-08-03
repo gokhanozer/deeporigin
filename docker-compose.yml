@@ -217,6 +217,12 @@ services:
       PORT: 4000
       API_PREFIX: api/v1
 
+      # Swagger is off by default under NODE_ENV=production — a real deployment
+      # should not publish a browsable, executable map of its own API. This is a
+      # demo stack, where the docs are part of what is being shown, so opt in
+      # explicitly. Drop this line for a genuine production deployment.
+      SWAGGER_ENABLED: "true"
+
       # Runtime queries go through PgBouncer, NOT straight to Postgres.
       #
       #   pgbouncer=true    — stops Prisma reusing named prepared statements,

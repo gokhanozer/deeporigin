@@ -85,7 +85,11 @@ async function bootstrap(): Promise<void> {
   app.enableShutdownHooks();
 
   // ---- API documentation ---------------------------------------------------
-  if (nodeEnv !== 'production') {
+  // Off by default in production — a public deployment should not publish a
+  // browsable, executable map of its own API. `SWAGGER_ENABLED` overrides that
+  // either way, which is how the demo compose stack serves the docs the README
+  // links to while still running with NODE_ENV=production.
+  if (config.get('swaggerEnabled', { infer: true })) {
     const swaggerConfig = new DocumentBuilder()
       .setTitle('DeepOrigin URL Shortener API')
       .setDescription(
