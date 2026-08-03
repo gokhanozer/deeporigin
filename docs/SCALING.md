@@ -6,19 +6,29 @@ balancer, ordered by when it starts to hurt.
 Each item names **what breaks**, **why**, and **the change**, so the work can be
 picked up in priority order rather than as a rewrite.
 
-> ## Status: Phase 1 is implemented ✅
+> ## Status: Phases 1 and 2 are implemented ✅
 >
-> The backend now scales horizontally:
+> The backend scales horizontally, and database connections no longer scale with
+> replica count.
+>
+> **Scaling is opt-in.** `docker compose up -d` gives the plain single-instance
+> stack; the overlay adds only what replication itself requires:
 >
 > ```bash
-> docker compose up -d --scale backend=3
+> docker compose -f docker-compose.yml -f docker-compose.scale.yml \
+>   up -d --scale backend=6
 > ```
 >
-> **Verified:** with 3 replicas and a 10-per-minute limit, exactly 10 requests
-> were allowed and the rest returned `429` — not 30. Requests were confirmed
-> spread across all three replicas, and the migration job ran exactly once.
+> **Measured results**
 >
-> Tier 2 and Tier 3 remain open, and are deliberately traffic-driven rather than
+> | Property | Result |
+> |---|---|
+> | Rate limit across 3 replicas | **10 allowed, rest `429`** — not 30 |
+> | Postgres connections at 3 replicas | **20** |
+> | Postgres connections at 6 replicas | **20** (flat — would be 150 unpooled) |
+> | Migration job runs | **once**, `Exited (0)` |
+>
+> Phases 3–6 remain open, and are deliberately traffic-driven rather than
 > speculative — see [Suggested order](#suggested-order).
 
 ---
@@ -74,8 +84,30 @@ seconds of latency to every request, and its `error` events are logged at
 Each replica logs on boot:
 
 ```
-[ThrottlerStorage] Connected to Redis — rate limits are shared across replicas
+[Redis] Redis connection ready
 ```
+
+#### Runtime overrides on top of the defaults
+
+The `RATE_LIMIT_*` environment variables set the **defaults**. Because the
+throttle decorators freeze their values into class metadata at module load, they
+cannot be changed without a restart — which is the wrong shape for an incident.
+
+`RateLimitOverrideService` reads per-bucket overrides from Redis and
+`ThrottlerProxyGuard` applies them per request, so a limit can be tightened,
+loosened or switched off across **every replica at once**, within about five
+seconds and with no deploy:
+
+```bash
+redis-cli SET ratelimit:override:create '{"limit":2}'          # tighten
+redis-cli SET ratelimit:override:auth '{"disabled":true}' EX 600  # load test
+redis-cli DEL ratelimit:override:create                        # revert
+```
+
+Fails open (Redis down ⇒ configured default applies) and rejects corrupt values,
+so the flag can never itself become the outage. Full detail and the
+already-blocked-client caveat are in
+[`IMPLEMENTATION.md` §10](IMPLEMENTATION.md#runtime-overrides-feature-flags).
 
 ---
 
@@ -97,7 +129,7 @@ migration errors will crash-loop.
 that does not exist yet, and its own command is now simply
 `['node', 'dist/main.js']`.
 
-Verified with 3 replicas: `shortener-migrate  Exited (0)` — the job ran **once**,
+Verified with 3 replicas: `shortener-setup-db  Exited (0)` — the job ran **once**,
 logging `No pending migrations to apply`, rather than three racing processes.
 
 This maps directly onto the production equivalents: a Kubernetes `initContainer`
@@ -113,9 +145,19 @@ deploy step you can gate on.
 container name and a published host port are unique resources that exactly one
 container can own.
 
-**Built:** `container_name` and `ports` were removed from the `backend` service.
-Compose now auto-names replicas `deeporigin-backend-1/-2/-3`, and a new
-**nginx `lb` service** owns host port 4000 and fans requests across them.
+**Built:** `container_name` was removed from the `backend` service outright, so
+Compose auto-names replicas `deeporigin-backend-1/-2/-3`.
+
+The port mapping is handled by a **separate overlay**, `docker-compose.scale.yml`,
+which clears it with `ports: !reset []` and adds an **nginx `lb` service** to own
+host port 4000 and fan requests across the replicas.
+
+Keeping that in an overlay rather than the base file is deliberate. The default
+`docker compose up -d` runs the plain single-instance stack — a reviewer running
+the documented command sees a normal application, not scaling scaffolding they
+did not ask for. Everything that makes replicas *correct* (Redis-backed limits,
+the migration job, PgBouncer) stays in the base file, because those are right at
+any replica count. Only the port/proxy arrangement is scaling-specific.
 
 One nginx detail matters. The upstream host is held in a *variable*:
 
@@ -248,16 +290,72 @@ visits per window it is an out-of-memory crash.
 
 ## Tier 3 — infrastructure
 
-### 3.1 Connection pool exhaustion
+### 3.1 Connection pool exhaustion ✅ DONE
 
-**Breaks:** Prisma opens a pool per process. 10 replicas × default pool can
-exceed Postgres's `max_connections` (typically 100), and new connections start
-being refused — which looks like a total outage.
+**Broke:** Prisma opens a pool **per process**, sized `cpus × 2 + 1` — 25 on this
+machine. Against Postgres's 100-connection default (97 usable after superuser
+reservations):
 
-**Change:** put **PgBouncer** in transaction-pooling mode in front of Postgres
-and set an explicit, small `connection_limit` in the Prisma URL. Note that
-transaction pooling disallows prepared statements, so add `pgbouncer=true` to
-the connection string for Prisma.
+```
+3 replicas × 25 =  75   (77% of budget)
+4 replicas × 25 = 100   → connections refused
+6 replicas × 25 = 150   → far past the limit
+```
+
+Pools are **lazy**, so this stays invisible at idle and fails under load — the
+worst possible timing, presenting as a total outage rather than a slowdown.
+
+**Built:** a `pgbouncer` service in transaction-pooling mode between the backend
+replicas and Postgres.
+
+| Setting | Value | Why |
+|---|---|---|
+| `POOL_MODE` | `transaction` | Returns a connection to the pool per *transaction*, not per session — this is what gives the multiplexing |
+| `MAX_CLIENT_CONN` | 500 | Client sockets are cheap |
+| `DEFAULT_POOL_SIZE` | 20 | Real Postgres connections — the scarce resource |
+| `AUTH_TYPE` | `scram-sha-256` | Postgres 16 stores passwords as SCRAM; PgBouncer's md5 default would fail |
+
+Backend replicas connect with `?pgbouncer=true&connection_limit=10`.
+`pgbouncer=true` stops Prisma reusing **named prepared statements**, which
+transaction pooling breaks — without it you get
+`prepared statement "s0" already exists` under concurrency.
+
+**Measured**
+
+| Replicas | Real Postgres connections |
+|---|---|
+| 3 | 20 |
+| 6 | 20 |
+
+Flat. Connection load is now decoupled from replica count entirely.
+
+#### The trap: migrations must bypass the pooler
+
+`prisma migrate deploy` takes a **session-level advisory lock** to prevent
+concurrent migrations. Transaction pooling is exactly what breaks it, because
+the `LOCK` and the `UNLOCK` can be issued on two different backend connections —
+routed through PgBouncer, migrations hang or fail.
+
+The fix is Prisma's two-URL split, in `schema.prisma`:
+
+```prisma
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")        // → pgbouncer:6432  (runtime queries)
+  directUrl = env("DIRECT_DATABASE_URL") // → postgres:5433   (migrations, seed)
+}
+```
+
+Verified in the logs: the migrate job reported
+`Datasource "db": … at "postgres:5433"` while the backend runs against
+`pgbouncer:6432`. This is the same pattern Supabase and Neon require, so it is
+well-trodden.
+
+**What made this app an easy case:** no `LISTEN/NOTIFY`, no session variables,
+no temp tables, and all four `$transaction` call sites use the **array form**,
+which is a single atomic round-trip. The *interactive* form
+(`$transaction(async tx => …)`) holds a connection across awaits and is where
+transaction pooling usually causes trouble — there are none.
 
 ### 3.2 Postgres is a single node
 
@@ -271,13 +369,21 @@ primary. Revisit only if a single primary genuinely saturates.
 not tracked by it. Once visits go through a queue (2.2) this resolves itself —
 the enqueue is synchronous and fast, and the worker drains independently.
 
-### 3.4 Proxy trust depth
+### 3.4 Proxy trust depth — reviewed, no change needed yet
 
-`app.set('trust proxy', 1)` trusts exactly one hop. Behind a cloud LB *plus* an
-ingress controller there are two, and `extractClientIp` would read the wrong
-address — breaking both rate-limit bucketing and visit geography. Set this to
-the real number of trusted hops per environment; never to `true`, which lets a
-client forge `X-Forwarded-For` and evade limits entirely.
+`app.set('trust proxy', 1)` trusts exactly one hop. **That is correct for the
+current topology** — browser → nginx → backend is precisely one proxy — so no
+change was made.
+
+It becomes a real setting to tune the moment another layer appears. Behind a
+cloud LB *plus* an ingress controller there are two hops, and `extractClientIp`
+would read the wrong address, breaking both rate-limit bucketing and visit
+analytics. Treat it as a **per-environment value**, and never set it to `true`,
+which trusts the whole `X-Forwarded-For` chain and lets any client forge a
+header to evade rate limiting entirely.
+
+Note this is a *correctness and security* concern, not a database one — it is
+grouped into Phase 2 only because it is small.
 
 ### 3.5 Move rate limiting to the edge
 
@@ -304,11 +410,51 @@ you anything. Keep the application-level limiter as defence in depth.
 | `--scale backend=3` starts cleanly | 3 healthy replicas |
 | Requests spread across replicas | 3 / 6 / 2 across `backend-1/2/3` |
 | **Rate limit shared, not multiplied** | **10 allowed, 5 blocked — not 30** |
-| Migration job runs once | `shortener-migrate Exited (0)` |
+| Migration job runs once | `shortener-setup-db Exited (0)` |
 | Counters stored in Redis | `{…:default}:hits`, `:blocked` |
 | Scale back down to 1 | API stays reachable |
-| In-memory fallback intact | `redis.url === null` when unset/empty; 166 tests pass without Redis |
+| In-memory fallback intact | `redis.url === null` when unset/empty; the full suite passes without Redis |
 | End to end through the LB | `/abc123` → 307; dashboard reads correctly |
+
+---
+
+## Phase 2 as delivered
+
+| File | Change |
+|---|---|
+| `docker-compose.yml` | Added the `pgbouncer` service; backend now depends on it and connects via `pgbouncer:6432` with `?pgbouncer=true&connection_limit=10`; `migrate` job pinned to the direct Postgres URL |
+| `backend/prisma/schema.prisma` | Added `directUrl` alongside `url`, with the advisory-lock reasoning |
+| `backend/.env`, `.env.example` | Added `DIRECT_DATABASE_URL` |
+
+**Verification performed**
+
+| Check | Result |
+|---|---|
+| Connections at 3 replicas | 20 |
+| Connections at 6 replicas | 20 (flat) |
+| Migrations use the direct URL | log shows `at "postgres:5433"` |
+| Runtime uses the pooler | `DATABASE_URL` → `pgbouncer:6432` |
+| Prepared statements under load | 120 concurrent requests, no errors |
+| Test suite | passed, no regressions |
+| Local dev (no pooler) | direct connection works |
+
+### A bug this verification surfaced
+
+Re-running the then-existing seed script failed with
+`P2002: Unique constraint failed on (slug)`.
+
+It created its first two links **anonymously** (`ownerId: null`) to exercise the
+no-account path, but its cleanup only deleted links owned by the demo user. The
+fixed slugs `abc123` and `nest` therefore survived and collided on the next run.
+The failure had been masked because earlier testing always wiped the volume
+first — and the function's docstring claimed it was idempotent.
+
+Worth recording for the general lesson: **"idempotent" in a docstring is a claim,
+not a guarantee**, and a test that always starts from a clean volume will never
+challenge it.
+
+> The seed script was removed entirely in a later change — the dashboard should
+> only ever show real traffic — so this file is no longer in the repo.
 
 ---
 
@@ -317,16 +463,27 @@ you anything. Keep the application-level limiter as defence in depth.
 | Phase | Items | Outcome |
 |---|---|---|
 | **1** ✅ | 1.3 remove `container_name` · 1.2 migrations as a deploy step · 1.1 Redis throttler | **Done** — correct behaviour at N replicas |
-| **2** | 3.1 PgBouncer · 3.4 proxy depth | Survives the connection math |
+| **2** ✅ | 3.1 PgBouncer · 3.4 proxy depth reviewed | **Done** — connections decoupled from replica count |
 | **3** | 2.1 Redis cache on redirects | Removes the dominant query |
 | **4** | 2.2 visit queue + worker | Removes write contention; makes tracking durable |
 | **5** | 2.3 SQL aggregation, then rollups | Dashboard stops scaling with table size |
 | **6** | 3.2 read replica · 3.5 edge limiting | Headroom |
 
-Phase 1 is a day's work and is the only part strictly required to *deploy*
-multiple nodes. Phases 3–5 are driven by measured traffic, not by anticipation —
-each should be justified by a metric (p99 redirect latency, lock wait time,
-dashboard query duration) rather than built speculatively.
+Phase 1 was the only part strictly required to *deploy* multiple nodes; Phase 2
+is cheap insurance against a failure mode that arrives abruptly rather than
+gradually. Both are done.
+
+**Phases 3–5 should be driven by measured traffic, not anticipation.** Each has a
+trigger metric that should justify starting it:
+
+| Phase | Trigger metric |
+|---|---|
+| 3 — redirect cache | p99 redirect latency |
+| 4 — visit queue | row-lock wait time on `links` |
+| 5 — analytics aggregation | dashboard query duration / worker memory |
+
+Building them speculatively adds a queue, a worker process and a rollup table to
+maintain — real complexity for load that may never arrive.
 
 ---
 
@@ -334,10 +491,10 @@ dashboard query duration) rather than built speculatively.
 
 | Service | Used for | Phase | Status |
 |---|---|---|---|
-| **Redis** | shared rate-limit counters — later the slug cache and visit queue | 1 | ✅ running |
+| **Redis** | shared rate-limit counters **and runtime override flags** — later the slug cache and visit queue | 1 | ✅ running |
 | **Load balancer** (nginx) | distributes across replicas | 1 | ✅ running |
 | **Migration job** | applies schema changes once per deploy | 1 | ✅ running |
-| **PgBouncer** | connection pooling | 2 | not started |
+| **PgBouncer** | connection pooling | 2 | ✅ running |
 | **Worker process** | drains the visit queue, writes rollups | 4 | not started |
 
 Redis earns its place three times over, which is the argument for adding it —

@@ -21,10 +21,11 @@ are stated along with the conditions under which the other option would win.
 9. [Security](#9-security)
 10. [Rate limiting](#10-rate-limiting)
 11. [Analytics and the dashboard](#11-analytics-and-the-dashboard)
-12. [Testing](#12-testing)
-13. [Docker and deployment](#13-docker-and-deployment)
-14. [Requirement traceability](#14-requirement-traceability)
-15. [Known limitations and what I would do next](#15-known-limitations-and-what-i-would-do-next)
+12. [Observability](#12-observability)
+13. [Testing](#13-testing)
+14. [Docker and deployment](#14-docker-and-deployment)
+15. [Requirement traceability](#15-requirement-traceability)
+16. [Known limitations and what I would do next](#16-known-limitations-and-what-i-would-do-next)
 
 ---
 
@@ -96,22 +97,40 @@ Owner sees the click on the dashboard
                         └──────────────────────────────────────┘
 ```
 
-The API tier is horizontally scalable. With `--scale backend=3` the shape becomes:
+The API tier is horizontally scalable, though that is **opt-in**: the default
+`docker compose up -d` runs the single-instance stack above. Layering on
+`docker-compose.scale.yml` clears the backend's port mapping and adds nginx, and
+the shape becomes:
 
 ```
    Browser ──▶ nginx (lb) :4000 ──┬──▶ backend-1 ─┐
-                                  ├──▶ backend-2 ─┼──▶ PostgreSQL :5433
-                                  └──▶ backend-3 ─┘
+                                  ├──▶ backend-2 ─┤   PgBouncer      PostgreSQL
+                                  ├──▶    …       ┼──▶  :6432   ────▶  :5433
+                                  └──▶ backend-6 ─┘  (20 real conns)
                                         │
                                         └──────────▶ Redis :6379
                                                      shared rate-limit counters
 
-   A one-shot `migrate` job applies the schema once, before any replica starts.
+   A one-shot `migrate` job applies the schema once — connecting DIRECTLY to
+   Postgres, bypassing PgBouncer — before any replica starts.
 ```
 
-nginx owns the published host port (only one container can), and resolves
-`backend` through Docker's embedded DNS on a short TTL so replicas can come and
-go without restarting it. Full detail in [`SCALING.md`](SCALING.md).
+Three pieces make this work:
+
+- **nginx** owns the published host port (only one container can) and resolves
+  `backend` through Docker's embedded DNS on a short TTL, so replicas can come
+  and go without restarting it. It lives in the scaling overlay rather than the
+  base stack because it exists *purely* to work around host-port uniqueness —
+  and in a real deployment it would not exist at all, a managed load balancer
+  filling the role with redundancy and TLS termination.
+- **Redis** holds the rate-limit counters. Per-process counters would let an
+  N-replica deployment serve N× the configured limit.
+- **PgBouncer** decouples database connections from replica count. Prisma opens
+  ~25 connections per process, so six unpooled replicas would need 150 against a
+  100-connection budget. Measured through the pooler: **20 at three replicas, 20
+  at six.**
+
+Full detail and measurements in [`SCALING.md`](SCALING.md).
 
 ### Why short links resolve on the *frontend* domain
 
@@ -397,69 +416,25 @@ focus rings and disabled styling stay consistent everywhere.
 
 ## 7. API reference
 
-Base URL: `http://localhost:4000/api/v1` · Interactive docs at `/api/v1/docs`.
+The full endpoint list, query parameters and error envelope live in
+**[`REFERENCE.md`](REFERENCE.md#api-endpoints)** — kept there so there is one
+place to look up a contract rather than two that can disagree.
 
-### Auth
+What is worth saying *here* is the shape of the contract rather than its
+contents:
 
-| Method | Path | Auth | Description |
-|---|---|:--:|---|
-| `POST` | `/auth/register` | — | Create an account → `{ accessToken, user }` |
-| `POST` | `/auth/login` | — | Sign in → `{ accessToken, user }` |
-| `GET` | `/auth/me` | ✅ | Current user (used to restore a session) |
+**One error envelope for every failure.** `AllExceptionsFilter` normalises Nest
+exceptions, Prisma errors and unhandled throws into a single JSON shape, so the
+frontend's API client has exactly one thing to parse. Prisma error codes are
+translated to proper HTTP semantics — `P2002` becomes `409 Conflict`, `P2025`
+becomes `404` — rather than leaking a 500 with database internals. Unexpected
+errors return a generic message; connection strings, file paths and query
+fragments are never echoed to a client.
 
-### Links
-
-| Method | Path | Auth | Description |
-|---|---|:--:|---|
-| `POST` | `/links` | optional | Create a short link. Signed in ⇒ owned |
-| `GET` | `/links` | optional | List links. `?mineOnly=true` scopes to the caller |
-| `GET` | `/links/:id` | optional | Single link |
-| `PATCH` | `/links/:id` | ✅ owner | **Update the slug**, URL, title, active flag, expiry |
-| `DELETE` | `/links/:id` | ✅ owner | Delete the link and its visits |
-| `GET` | `/links/slug-available/:slug` | — | Live availability check |
-
-`GET /links` accepts `page`, `pageSize` (max 100), `search`, `sortBy`
-(`createdAt` \| `visitCount` \| `lastVisitedAt` \| `slug`), `sortOrder`, `mineOnly`.
-
-### Redirect
-
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/redirect/:slug/resolve` | Resolve **and record a visit** → `{ targetUrl }` |
-| `GET` | `/redirect/:slug` | Real 302 redirect |
-| `GET` | `/redirect/:slug/peek` | Resolve **without** recording a visit |
-
-### Analytics
-
-| Method | Path | Auth | Description |
-|---|---|:--:|---|
-| `GET` | `/analytics/overview?days=30` | optional | Dashboard. Signed in ⇒ own links; anonymous ⇒ public totals |
-| `GET` | `/analytics/links/:id?days=30` | owner | Per-link analytics |
-
-### Health
-
-`GET /health` (liveness) · `GET /health/ready` (includes a database round-trip)
-
-### Error format
-
-Every failure returns the same envelope, produced by `AllExceptionsFilter`:
-
-```json
-{
-  "statusCode": 400,
-  "error": "Bad Request",
-  "message": "Only http and https URLs are supported",
-  "details": ["optional field-level messages"],
-  "path": "/api/v1/links",
-  "timestamp": "2026-07-27T17:21:03.545Z"
-}
-```
-
-Because there is exactly one shape, the frontend's API client has exactly one contract to
-parse. Unexpected server errors return a generic message — internal details (connection
-strings, file paths, query fragments) are never echoed to a client.
-
----
+**Optional authentication is a first-class case.** `POST /links` and
+`GET /links` use `OptionalJwtAuthGuard`: anonymous callers succeed, and a token
+merely attaches ownership. That is what keeps the core action usable without an
+account.
 
 ## 8. Frontend structure
 
@@ -538,13 +513,224 @@ abuse of each endpoint would be:
 
 | Endpoint group | Limit | Rationale |
 |---|---|---|
-| Auth (`/auth/*`) | **5 / min** | Brute force and credential stuffing are the highest-value attacks |
+| `POST /auth/register`, `POST /auth/login` | **5 / min** | Every request is a guess at a secret, so being permissive risks account takeover. bcrypt also makes each attempt costly server-side, so unlimited attempts are a CPU-exhaustion vector |
 | Link creation (`POST /links`) | **10 / min** | The only anonymous endpoint that writes rows |
 | Everything else | **100 / min** | Generous enough for normal browsing |
 | Redirects (`/redirect/*`) | **exempt** | See below |
 | Health probes | **exempt** | Probes run on a schedule and would consume the orchestrator's budget |
 
-All limits are configurable through environment variables.
+These are the **defaults**, set through environment variables
+(`RATE_LIMIT_MAX`, `RATE_LIMIT_CREATE_MAX`, `RATE_LIMIT_AUTH_MAX`,
+`RATE_LIMIT_WINDOW_MS`) on the `backend` service. They are deploy-time
+configuration: version-controlled, reviewed, reproducible.
+
+Any of them can be **overridden at runtime** without a restart — see
+[Runtime overrides](#runtime-overrides-feature-flags) below.
+
+### Limits are assigned per route, not per controller
+
+Strictness tracks **the cost of one abusive request**, not how popular the
+endpoint is:
+
+```
+account takeover  >  a junk database row  >  a cached read
+   5/min                  10/min                100/min
+```
+
+This is why `POST /links` carries `@ThrottleCreate()` at the *method* level while
+the other five routes on the same controller (`GET /links`, `GET /:id`, `PATCH`,
+`DELETE`, `slug-available`) fall through to the default. Only that one route
+writes rows anonymously.
+
+#### A bug that made the distinction concrete
+
+`@ThrottleAuth()` was originally applied at **controller** level, which swept
+`GET /auth/me` into the 5/min brute-force bucket alongside `login` and
+`register`.
+
+`GET /auth/me` is not a credential guess — it *proves an existing* token. And
+the frontend calls it on every page load to restore the session. So a signed-in
+user who refreshed five or six times in a minute exhausted the auth budget and
+received a `429`.
+
+It got worse in the frontend, where `AuthProvider` treated any rejection as a
+bad token:
+
+```ts
+.catch(() => {
+  clearStoredToken();   // ← also fired on 429, network blips, 502/503
+  setUser(null);
+})
+```
+
+The user was **silently signed out for refreshing too fast**, and recovery
+required a fresh login — itself an auth request, which could also be limited.
+
+Two fixes:
+
+1. `@ThrottleAuth()` moved onto `register` and `login` individually; the
+   controller carries no bucket, so `me` falls through to the default.
+2. The catch narrowed to `error instanceof ApiError && error.isUnauthorized`.
+   Everything else keeps the token and lets the next navigation retry.
+
+Verified: 15 consecutive `/auth/me` calls now all return `200` (previously `429`
+at the sixth), while eight failed logins still stop at five. `auth.controller.spec.ts`
+asserts the bucket assignment — including that the **controller itself is
+untagged**, so restoring a controller-level decorator fails the build.
+
+### Runtime overrides (feature flags)
+
+Environment variables give the **default** limits. They are the wrong shape for
+exactly one situation: an incident. When an endpoint is being scraped you want
+the limit tightened in seconds, not in a deploy cycle — and during a load test
+you want limiting off for a few minutes without shipping anything.
+
+`RateLimitOverrideService` adds that escape hatch. Overrides live in Redis under
+named buckets and take precedence over the configured value:
+
+```
+decorator value (from env)  ─┐
+                             ├─▶  effective limit   (override wins)
+Redis override (if present) ─┘
+```
+
+Because they are plain Redis keys, they need no admin API and therefore no new
+authentication surface to secure.
+
+#### Runbook
+
+You are setting **data keys**, not editing a Redis config file, and nothing is
+restarted.
+
+```bash
+docker compose exec redis redis-cli SET ratelimit:override:<bucket> '<json>' EX <seconds>
+```
+
+**Buckets**
+
+| Bucket | Covers | Default from |
+|---|---|---|
+| `create` | `POST /links` | `RATE_LIMIT_CREATE_MAX` (10/min) |
+| `auth` | `POST /auth/register`, `POST /auth/login` — **not** `GET /auth/me` | `RATE_LIMIT_AUTH_MAX` (5/min) |
+| `default` | every other endpoint | `RATE_LIMIT_MAX` (100/min) |
+
+**Payload** — all fields optional, combinable:
+
+| Field | Effect |
+|---|---|
+| `limit` | replacement allowance for the window |
+| `ttl` | replacement window length, in ms |
+| `disabled` | `true` switches enforcement off for that bucket |
+
+**Examples**
+
+```bash
+# tighten link creation to 2/min for 15 minutes during an incident
+docker compose exec redis redis-cli \
+  SET ratelimit:override:create '{"limit":2}' EX 900
+
+# widen the general bucket: 500 requests per 30s window, for an hour
+docker compose exec redis redis-cli \
+  SET ratelimit:override:default '{"limit":500,"ttl":30000}' EX 3600
+
+# switch auth limiting off for a 10-minute load test
+docker compose exec redis redis-cli \
+  SET ratelimit:override:auth '{"disabled":true}' EX 600
+
+# revert early
+docker compose exec redis redis-cli DEL ratelimit:override:create
+```
+
+**Verify**
+
+```bash
+docker compose exec redis redis-cli GET ratelimit:override:create   # {"limit":2}
+docker compose exec redis redis-cli TTL ratelimit:override:create   # 900
+```
+
+Then allow ~5 seconds for the in-memory cache to expire before concluding it did
+not work.
+
+**Always set `EX`.** An override that expires on its own cannot be forgotten,
+which is how emergency changes become permanent policy nobody remembers making.
+
+**Do not** edit `RATE_LIMIT_*` for a temporary change — those are the defaults,
+they require a container recreate, and they should go through code review.
+Reserve them for permanent policy.
+
+**Why a guard-level interception, not config reloading.** `@ThrottleAuth()` and
+`@ThrottleCreate()` are evaluated at *module load*, before the DI container
+exists, and their numbers are frozen into class metadata. No amount of
+config-reloading can change them. Routes are therefore tagged with a stable
+**bucket name** (`auth`, `create`, `default`), and `ThrottlerProxyGuard`
+overrides `handleRequest()` to substitute the effective values per request.
+
+Design decisions:
+
+| Decision | Reason |
+|---|---|
+| Cached 5 s in memory | A Redis round-trip per request would put network latency on the hot path for a value that changes twice a year |
+| Fails open | Redis unreachable ⇒ no override ⇒ configured limit applies. An override system that can *break* rate limiting is worse than none |
+| Rejects corrupt values | `{"limit":0}`, `NaN` and malformed JSON are discarded — a bad value must never lock out all traffic |
+| Negative results cached | A Redis outage costs one failed lookup, not one per request |
+| `redis-cli` rather than an admin endpoint | Avoids inventing an auth model for a new privileged route |
+
+Verified end to end: baseline 10/min → override to 2/min → kill switch (20
+requests, zero `429`) → revert to 10/min, all without restarting anything.
+
+#### ⚠️ Loosening a limit does not un-block an already-blocked client
+
+`@nestjs/throttler` keeps **two** keys per bucket, `:hits` and `:blocked`. Once a
+client exceeds the limit it enters the blocked state for `blockDuration`, and
+that state is checked *independently of the current limit*. Raising the limit or
+deleting the override therefore applies from the next window — but a client
+already blocked stays blocked until its key expires.
+
+That is usually correct when tightening. To unblock someone immediately, the
+counters must also be cleared:
+
+```bash
+redis-cli --scan --pattern '*default*' | xargs redis-cli DEL
+```
+
+This resets everyone's allowance for the current window, so it is a blunt
+instrument: acceptable during an incident, not a routine operation.
+
+#### Why Redis and not PostgreSQL
+
+The obvious alternative is a `rate_limit_overrides` table. Redis wins for what
+this feature currently *is* — an operational escape hatch:
+
+| | Redis | PostgreSQL |
+|---|---|---|
+| **Native TTL** | ✅ `EX 600` — self-expiring | ❌ needs an `expires_at` column, filtering on every read, and a cleanup job |
+| **New dependency** | none — already running | a migration, a table, a repository |
+| **Failure mode** | override lost ⇒ reverts to the reviewed default (**fails safe**) | override persists through everything, including being forgotten |
+| **Audit trail** | ❌ no record of who or why | ✅ `created_by`, `reason`, history |
+| **Joins to app data** | ❌ | ✅ per-user / per-plan limits |
+
+Read speed is *not* the deciding factor, despite being the usual argument: the
+5-second cache means either store is consulted roughly twelve times a minute.
+
+**Move it to PostgreSQL when the flag stops being an ops toggle**, on either
+trigger:
+
+1. **Per-user or per-plan limits** — `free = 10/min, enterprise = 1000/min` is
+   business policy, not an incident lever. It must join to `users`, be durable,
+   and never silently vanish. Likely a column on a `plans` table rather than an
+   override at all.
+2. **An audit requirement** — Redis cannot say *who* disabled auth limiting last
+   Tuesday, or why. If compliance needs that, you need rows with attribution.
+
+The endgame if both are needed is the standard hybrid: PostgreSQL as source of
+truth, Redis as the published read cache. Three moving parts, so not worth
+building before the requirement exists.
+
+**A note on durability.** The Redis service runs with `--appendonly no`, but RDB
+snapshotting remains active — so overrides survive both a graceful restart and a
+SIGKILL in practice (verified). Durability is *windowed*, not guaranteed: a write
+in the gap between snapshots can be lost. For an ops override that is acceptable,
+because losing one fails safe back to the configured default.
 
 ### Two implementation details that turned out to matter
 
@@ -596,7 +782,7 @@ TypeScript, rather than issuing five separate `GROUP BY` queries. The reasoning:
 - the query is bounded by an indexed date window, so the row count scales with recent
   traffic rather than with table size.
 
-At genuinely large volumes this becomes the wrong trade — see [§15](#15-known-limitations-and-what-i-would-do-next).
+At genuinely large volumes this becomes the wrong trade — see [§16](#16-known-limitations-and-what-i-would-do-next).
 
 Every dashboard query runs inside one transaction, so every number on screen describes the
 same instant.
@@ -641,22 +827,170 @@ asks. Changing `IP_HASH_SALT` resets unique-visitor counts, which is the intende
 
 ---
 
-## 12. Testing
+## 12. Observability
 
-**124 unit tests, all passing.**
+Section 11 covers **product analytics** — how your *links* are doing. This section
+covers **operational metrics** — how the *system* is doing. They are deliberately
+separate concerns, and the tooling choices invert between them:
+
+| | Product analytics | Operational metrics |
+|---|---|---|
+| Question | "which links are popular?" | "is it up, is it fast, is it being abused?" |
+| Audience | the link's owner | whoever is on call |
+| Storage | PostgreSQL, queried like any feature | Prometheus, scraped on an interval |
+| Retention | indefinite | days |
+| Built with | hand-rolled — it is *your* data and schema | `prom-client` — you want the standard exposition format |
+
+Hand-rolling was right for the first and would be wrong for the second: the whole
+value of Prometheus format is that Grafana, alertmanager and every other tool in
+the ecosystem understand it without custom integration.
+
+### What is exposed
+
+`GET /api/v1/metrics` returns Prometheus text format.
+
+| Metric | Type | Answers |
+|---|---|---|
+| `shortener_redirect_total{result}` | counter | How much traffic, and what share 404s |
+| `shortener_redirect_duration_seconds` | histogram | Is the hot path fast? |
+| `http_request_duration_seconds{method,route,status}` | histogram | Which endpoint is slow or erroring |
+| `shortener_link_created_total{slug_type}` | counter | Growth, and custom-vs-generated split |
+| `shortener_slug_collision_total` | counter | **When to raise `SLUG_LENGTH`** |
+| `shortener_rate_limit_rejected_total{bucket}` | counter | **How much traffic is being shed, and from where** |
+| `shortener_visit_record_failed_total` | counter | **Whether fire-and-forget writes are failing** |
+| `shortener_*` (process) | mixed | CPU, memory, GC, event-loop lag |
+| `prisma_*` | mixed | Connection-pool saturation |
+
+The three in bold were previously **unanswerable**. Slug collisions were logged
+but never aggregated; rate-limit rejections were invisible; and `recordVisit` is
+deliberately fire-and-forget, so a persistent write failure produced no signal at
+all beyond a log line nobody reads.
+
+### Three design decisions that matter
+
+**1. Cardinality is the thing that kills Prometheus deployments.**
+
+Every distinct label combination becomes its own time series. Labelling by
+anything unbounded grows the series count without limit until the server
+exhausts memory.
+
+```ts
+route: '/links/:id'      // ✅ route template — bounded by the number of routes
+route: '/links/abc-123'  // ❌ one series per link, forever
+```
+
+`MetricsInterceptor` therefore records Express's **route pattern**, never
+`req.url`. Requests matching no route are dropped rather than recorded — a
+scanner probing random paths would otherwise be the very thing that blows it up.
+High-cardinality detail belongs in logs, or in the `visits` table where per-link
+data already lives.
+
+**2. Scrape replicas individually — never through the load balancer.**
+
+This one is specific to this architecture. If Prometheus scraped
+`localhost:4000`, nginx would round-robin each scrape to a *different* replica,
+so a counter would appear to jump backwards and forwards at random and every
+`rate()` would be meaningless.
+
+`prometheus.yml` uses `dns_sd_configs` against the `backend` service, so Docker's
+embedded DNS returns every replica and each is scraped directly. Verified with
+three replicas — three distinct targets, all `up`. Aggregate in PromQL instead:
+
+```promql
+sum by (route) (rate(http_request_duration_seconds_count[5m]))
+```
+
+**3. Custom histogram buckets.**
+
+The library defaults are tuned for second-scale work and would file every
+redirect in the lowest bucket, reporting nothing. Buckets here span 1ms–1s, the
+range this app actually operates in.
+
+### Alerting
+
+Five rules in `observability/alerts.yml`, deliberately few — an alert that does
+not map to a human action is noise, and noise trains people to ignore the
+channel.
+
+| Alert | Fires when | Action |
+|---|---|---|
+| `BackendReplicaDown` | a replica unscrapeable 1m | investigate the instance |
+| `RedirectLatencyHigh` | p99 > 250ms for 10m | enable the slug cache — Phase 3 |
+| `VisitWritesFailing` | any failure rate for 5m | analytics are being lost silently |
+| `RateLimitRejectionSpike` | sustained 429s per bucket | abuse, or a limit set too low |
+| `SlugKeyspaceFilling` | collisions rising for 30m | raise `SLUG_LENGTH` |
+
+`RedirectLatencyHigh` uses the same 250ms threshold that
+[`SCALING.md`](SCALING.md) gives as the Phase 3 trigger, so the alerting and the
+roadmap cannot drift apart.
+
+### Running it
+
+The instrumentation ships in the **base image** — exposing metrics is part of the
+application. The stack that *collects* them is an opt-in overlay, on the same
+reasoning as `docker-compose.scale.yml`: someone running `docker compose up`
+should get an application, not a monitoring platform.
+
+```bash
+docker compose -f docker-compose.yml \
+               -f docker-compose.observability.yml up -d
+```
+
+| | |
+|---|---|
+| Prometheus | <http://localhost:9090> — targets, alerts, raw PromQL |
+| Grafana | <http://localhost:3001> — `admin` / `admin` |
+
+Composable with the scaling overlay to watch several replicas at once.
+
+**Grafana ships with the datasource provisioned but no dashboards.** Wiring
+Grafana to Prometheus by hand is setup friction with no insight in it, so it is
+automated; building panels is the interesting part and is left to whoever is
+exploring. `Explore` works on first launch.
+
+### Notes
+
+**`/metrics` should not be public.** The exposition reveals route names, traffic
+volume and internal timings — useful reconnaissance. It is served on the main
+port here so the demo stack works without extra plumbing; a real deployment binds
+it to an internal port or restricts it by network policy. It also carries
+`@SkipThrottle()`, since a 15-second scrape from every replica would otherwise
+consume the rate-limit budget.
+
+**Prisma's `metrics` preview feature is deprecated.** It works today and gives
+pool saturation for free, but Prisma will remove it. `MetricsService` wraps the
+call in a try/catch, so its removal degrades the exposition rather than breaking
+the scrape endpoint. The replacement is either Prisma's OpenTelemetry tracing or
+PgBouncer's `SHOW POOLS` — arguably the better source now that PgBouncer owns the
+real connections.
+
+**Still missing: structured logging and tracing.** Metrics tell you *that*
+something is slow; a trace tells you *why*. Correlated request IDs and
+OpenTelemetry spans would be the next addition, and are not built.
+
+---
+
+## 13. Testing
+
+**205 unit tests across 15 suites, all passing** — and they need no database or
+Redis, which is why the whole run takes a few seconds.
 
 ```
-PASS  src/common/utils/slug.util.spec.ts
-PASS  src/common/utils/url.util.spec.ts
-PASS  src/common/utils/date.util.spec.ts
-PASS  src/common/utils/pagination.util.spec.ts
-PASS  src/common/utils/user-agent.util.spec.ts
-PASS  src/links/links.mapper.spec.ts
-PASS  src/links/links.service.spec.ts
-
-Test Suites: 7 passed, 7 total
-Tests:       124 passed, 124 total
+Test Suites: 15 passed, 15 total
+Tests:       205 passed, 205 total
 ```
+
+| Suite | Covers |
+|---|---|
+| `common/utils/{slug,url,date,pagination,user-agent}.util.spec.ts` | The pure helpers — where the subtle logic lives |
+| `links/{links.service,links.mapper}.spec.ts` | Collision retry, ownership, search and sort |
+| `links/dto/link.dto.spec.ts` | Query-string coercion — `?mineOnly=false` must not become `true` |
+| `redirect/redirect.service.spec.ts` | The hot path — resolution, expiry, counting |
+| `visits/visits.service.spec.ts` | Click recording, IP hashing |
+| `analytics/analytics.service.spec.ts` | Bucketing, gap-filling, owner scoping |
+| `auth/{auth.service,auth.controller}.spec.ts` | Hashing, token issue, and per-route throttle tags |
+| `common/rate-limit/rate-limit-override.service.spec.ts` | Redis overrides, cache, fail-open |
+| `app.e2e.spec.ts` | Bootstrap and the global pipeline |
 
 Coverage is concentrated where bugs would be expensive:
 
@@ -700,7 +1034,7 @@ The full stack was exercised against the running containers:
 
 ---
 
-## 13. Docker and deployment
+## 14. Docker and deployment
 
 Both images are **multi-stage**: the toolchain is needed to build but is dead weight at
 runtime, so only compiled output and production dependencies reach the final stage.
@@ -742,9 +1076,15 @@ with one instance, but with N replicas it becomes N processes racing the same da
 every deploy. The job maps directly onto a Kubernetes `initContainer` or an ECS one-off
 task.
 
+**The migrate job connects straight to Postgres, bypassing PgBouncer.** This is required,
+not an optimisation: `migrate deploy` takes a session-level advisory lock, and
+transaction-pooling can issue the `LOCK` and `UNLOCK` on two different backend connections.
+Prisma's datasource therefore declares two URLs — `url` through the pooler for runtime
+queries, `directUrl` straight to Postgres for migrations and seeding.
+
 ---
 
-## 14. Requirement traceability
+## 15. Requirement traceability
 
 | # | Requirement | Implementation | Verified |
 |---|---|---|:--:|
@@ -769,7 +1109,7 @@ task.
 
 ---
 
-## 15. Known limitations and what I would do next
+## 16. Known limitations and what I would do next
 
 Stated honestly — each is a deliberate scope decision, not an oversight.
 
@@ -793,7 +1133,7 @@ backend DTOs. A monorepo with a shared package — or generating a client from t
 document Nest already produces — would make drift impossible. For two apps, the build tooling
 seemed a worse trade than the duplication.
 
-**No end-to-end test suite.** The flows in [§12](#12-testing) were verified manually against
+**No end-to-end test suite.** The flows in [§13](#13-testing) were verified manually against
 the running stack. Playwright covering shorten → copy → redirect → dashboard would be the
 next addition, and is what I would write first if this were going into CI.
 
@@ -811,32 +1151,7 @@ none of them in the brief.
 
 ## Appendix: environment variables
 
-### Backend
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `DATABASE_URL` | — | **Required.** Postgres connection string |
-| `NODE_ENV` | `development` | Enables production hardening |
-| `PORT` | `4000` | HTTP port |
-| `API_PREFIX` | `api/v1` | Route prefix |
-| `CORS_ORIGINS` | `http://localhost:3000` | Comma-separated allowed origins |
-| `PUBLIC_BASE_URL` | `http://localhost:3000` | Base used to build short URLs |
-| `JWT_SECRET` | dev value | **Required in production** (≥16 chars) |
-| `JWT_EXPIRES_IN` | `7d` | Token lifetime |
-| `BCRYPT_ROUNDS` | `10` | Password hashing cost |
-| `SLUG_LENGTH` | `7` | Generated slug length |
-| `MAX_SLUG_ATTEMPTS` | `5` | Collision retries |
-| `IP_HASH_SALT` | dev value | **Required in production** |
-| `RATE_LIMIT_WINDOW_MS` | `60000` | Window length |
-| `RATE_LIMIT_MAX` | `100` | General allowance |
-| `RATE_LIMIT_CREATE_MAX` | `10` | Link-creation allowance |
-| `RATE_LIMIT_AUTH_MAX` | `5` | Auth allowance |
-| `PRISMA_LOG_QUERIES` | `false` | Log every SQL statement |
-
-### Frontend
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `NEXT_PUBLIC_API_URL` | `http://localhost:4000/api/v1` | API base for **browser** code (build-time) |
-| `API_INTERNAL_URL` | falls back to the above | API base for **server** code |
-| `NEXT_PUBLIC_SHORT_DOMAIN` | `localhost:3000` | Cosmetic prefix in the slug field |
+Moved to **[`REFERENCE.md`](REFERENCE.md#environment-variables)**, which lists
+every variable for the root `.env`, the backend and the frontend, together with
+the two build-time gotchas (`NEXT_PUBLIC_*` inlining, and why two API URLs
+exist).

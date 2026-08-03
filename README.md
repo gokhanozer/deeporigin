@@ -10,15 +10,9 @@ https://some.place.example.com/foo/bar/biz  →  http://localhost:3000/abc123
 
 **Stack:** React + Next.js (TypeScript) · NestJS (TypeScript) · Prisma · PostgreSQL · Docker
 
-📖 **[Full implementation notes →](docs/IMPLEMENTATION.md)** — architecture, data model,
-API reference, reusable-function catalogue, and the reasoning behind each design decision.
-
-📈 **[Scaling plan →](docs/SCALING.md)** — what changes to run this across multiple nodes,
-ordered by when each bottleneck starts to hurt.
-
 ---
 
-## Quick start
+## Run it
 
 The only prerequisite is Docker.
 
@@ -29,21 +23,97 @@ cp .env.example .env        # then edit the credentials
 docker compose up --build
 ```
 
-The API scales horizontally — run several replicas behind the bundled nginx load
-balancer, with rate-limit counters shared through Redis:
-
-```bash
-docker compose up -d --build --scale backend=3
-```
-
 | What | Where |
 |------|-------|
-| App & short links | <http://localhost:3000> |
+| **App & short links** | <http://localhost:3000> |
 | API | <http://localhost:4000/api/v1> |
 | API docs (Swagger) | <http://localhost:4000/api/v1/docs> |
 | Health probe | <http://localhost:4000/api/v1/health/ready> |
 
-Database migrations are applied automatically on start-up. Nothing else to configure.
+Migrations run automatically. Nothing else to configure.
+
+**Try it:** shorten a URL on the home page, click the short link, then open
+`/dashboard` — the visit count moves. The database starts empty by design, so
+everything you see is real traffic.
+
+### What `docker compose up` starts
+
+**Six services — the application.** Postgres, PgBouncer, Redis, a one-shot
+migration job, one backend and the frontend. No load balancer; the backend
+publishes port 4000 itself.
+
+**Scaling and monitoring are optional add-ons, not the default.** They live in
+separate compose overlays you opt into, because someone running this for the
+first time should get an application, not a platform. Details in the two
+sections below.
+
+<details>
+<summary><b>Optional: run several API replicas</b></summary>
+
+The API is built to scale horizontally. Layering on `docker-compose.scale.yml`
+drops the backend's port mapping and puts nginx in front, so replicas can share
+the host port:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.scale.yml \
+  up -d --build --scale backend=3
+```
+
+Everything that makes replicas *correct* — Redis-backed rate limiting, the
+one-shot migration job, PgBouncer — is in the base stack already, because those
+are right at any replica count. The overlay only adds what scaling itself
+requires.
+
+Verified: with 3 replicas a 10-per-minute limit allows exactly 10 requests, not
+30; database connections stay flat at 20 whether running 3 replicas or 6. See
+[`docs/SCALING.md`](docs/SCALING.md).
+
+*(In a real deployment this nginx would not exist — a managed load balancer fills
+the role. It stands in so `--scale` is demonstrable locally.)*
+
+</details>
+
+<details>
+<summary><b>Optional: Prometheus + Grafana</b></summary>
+
+The backend exposes `GET /api/v1/metrics` in Prometheus format from the **base**
+image — instrumentation is part of the application. The stack that *collects* it
+is opt-in:
+
+```bash
+docker compose -f docker-compose.yml \
+               -f docker-compose.observability.yml up -d
+```
+
+| | |
+|---|---|
+| Prometheus | <http://localhost:9090> — targets, alerts, PromQL |
+| Grafana | <http://localhost:3001> — `admin` / `admin` |
+
+Composable with the scaling overlay to watch several replicas at once. Prometheus
+discovers each replica by DNS and scrapes them **individually** — scraping through
+nginx would round-robin every scrape to a different replica and make `rate()`
+meaningless.
+
+The Grafana datasource is provisioned; dashboards are deliberately not. See
+[`docs/IMPLEMENTATION.md` §12](docs/IMPLEMENTATION.md#12-observability).
+
+</details>
+
+---
+
+## Documentation
+
+🚀 **[Developer guide →](docs/DEVELOPER_GUIDE.md)** — **start here.** Quickstart, the
+four run modes, code map, testing, troubleshooting.
+
+📋 **[Reference →](docs/REFERENCE.md)** — env vars, endpoints, schema, Redis keys, metrics.
+
+📖 **[Implementation notes →](docs/IMPLEMENTATION.md)** — architecture, data model, and
+the reasoning behind each design decision.
+
+📈 **[Scaling plan →](docs/SCALING.md)** — what changes to run this across multiple
+nodes, ordered by when each bottleneck starts to hurt.
 
 ---
 
@@ -73,8 +143,9 @@ Every item from the task description, and where it lives:
 | Node.js **with TypeScript** | ✅ | NestJS, strict mode |
 
 **Beyond the brief:** live slug-availability checking, link search and sorting, per-link
-analytics pages, link expiry, reserved-slug protection, SSRF and stored-XSS guards,
-privacy-preserving IP hashing, health probes, Swagger docs, and 124 unit tests.
+analytics pages, All-links / My-links scoping, analytics windows from 24 hours to 90 days,
+link expiry, reserved-slug protection, SSRF and stored-XSS guards, privacy-preserving IP
+hashing, health probes, Swagger docs, Prometheus metrics, and 205 unit tests.
 
 ---
 
@@ -112,7 +183,6 @@ cd backend
 cp .env.example .env
 npm install
 npx prisma migrate deploy
-npm run db:seed        # optional demo data — demo@example.com / demo12345
 npm run start:dev
 
 # 3. Frontend  →  http://localhost:3000
@@ -126,7 +196,7 @@ npm run dev
 
 ```bash
 # Backend
-npm test              # 124 unit tests
+npm test              # 205 unit tests
 npm run test:cov      # with coverage
 npm run typecheck     # tsc --noEmit
 npm run prisma:studio # browse the database
@@ -142,10 +212,16 @@ npm run typecheck
 
 ```
 .
-├── docker-compose.yml          Postgres · Redis · migrate job · backend · nginx · frontend
-├── nginx/nginx.conf            Load balancer across backend replicas
+├── docker-compose.yml              Base: Postgres · PgBouncer · Redis · migrate · backend · frontend
+├── docker-compose.scale.yml        Overlay: nginx load balancer, for --scale backend=N
+├── docker-compose.observability.yml Overlay: Prometheus · Grafana · 2 exporters
+├── nginx/nginx.conf                Load balancer config (scaled mode only)
+├── observability/                  Prometheus scrape config, alert rules, Grafana provisioning
 ├── docs/
+│   ├── DEVELOPER_GUIDE.md      Start here — quickstart, run modes, code map, testing
+│   ├── REFERENCE.md            Env vars, endpoints, schema, Redis keys, metrics
 │   ├── IMPLEMENTATION.md       Full technical write-up
+│   ├── SCALING.md              Scaling plan, phase by phase
 │   └── DeepOriginTaskDescription.pdf
 ├── backend/                    NestJS API
 │   ├── prisma/schema.prisma    Data model (User, Link, Visit)
