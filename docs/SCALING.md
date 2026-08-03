@@ -11,12 +11,13 @@ picked up in priority order rather than as a rewrite.
 > The backend scales horizontally, and database connections no longer scale with
 > replica count.
 >
-> **Scaling is opt-in.** `docker compose up -d` gives the plain single-instance
-> stack; the overlay adds only what replication itself requires:
+> **Scaling is opt-in.** `docker compose up --build` gives the plain
+> single-instance stack; the Scale Mode overlay adds only what replication itself
+> requires:
 >
 > ```bash
 > docker compose -f docker-compose.yml -f docker-compose.scale.yml \
->   up -d --scale backend=6
+>   up -d --build --scale backend=6
 > ```
 >
 > **Measured results**
@@ -153,11 +154,12 @@ which clears it with `ports: !reset []` and adds an **nginx `lb` service** to ow
 host port 4000 and fan requests across the replicas.
 
 Keeping that in an overlay rather than the base file is deliberate. The default
-`docker compose up -d` runs the plain single-instance stack — a reviewer running
-the documented command sees a normal application, not scaling scaffolding they
-did not ask for. Everything that makes replicas *correct* (Redis-backed limits,
-the migration job, PgBouncer) stays in the base file, because those are right at
-any replica count. Only the port/proxy arrangement is scaling-specific.
+`docker compose up --build` runs the plain single-instance stack — a reviewer
+running the documented command sees a normal application, not scaling
+scaffolding they did not ask for. Everything that makes replicas *correct*
+(Redis-backed limits, the migration job, PgBouncer) stays in the base file,
+because those are right at any replica count. Only the port/proxy arrangement is
+scaling-specific.
 
 One nginx detail matters. The upstream host is held in a *variable*:
 
@@ -454,7 +456,8 @@ you anything. Keep the application-level limiter as defence in depth.
 
 | File | Change |
 |---|---|
-| `docker-compose.yml` | Added `redis` and one-shot `migrate` services; added the nginx `lb`; removed `container_name` + `ports` from `backend`; added `REDIS_URL` |
+| `docker-compose.yml` | Added `redis` and one-shot `migrate` services; removed `container_name` from `backend`; added `REDIS_URL` |
+| `docker-compose.scale.yml` | Clears the backend port mapping and adds the nginx `lb` service |
 | `nginx/nginx.conf` | **New** — load balancer with dynamic DNS re-resolution and forwarded client IP |
 | `backend/src/app.module.ts` | Throttler storage selected at boot; `createRedisThrottlerStorage()` with the fail-open policy |
 | `backend/src/config/configuration.ts` | New `redis.url` key; `null` when unset **or** empty |
@@ -544,12 +547,12 @@ maintain — real complexity for load that may never arrive.
 
 ---
 
-## New infrastructure this implies
+## Infrastructure Summary
 
 | Service | Used for | Phase | Status |
 |---|---|---|---|
 | **Redis** | shared rate-limit counters **and runtime override flags** — later the slug cache and visit queue | 1 | ✅ running |
-| **Load balancer** (nginx) | distributes across replicas | 1 | ✅ running |
+| **Load balancer** (nginx) | distributes across replicas | 1 | ✅ in Scale Mode |
 | **Migration job** | applies schema changes once per deploy | 1 | ✅ running |
 | **PgBouncer** | connection pooling | 2 | ✅ running |
 | **Worker process** | drains the visit queue, writes rollups | 4 | not started |

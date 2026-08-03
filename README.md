@@ -8,13 +8,40 @@ Paste a long URL, get a short one, share it, and see how it performs.
 https://some.place.example.com/foo/bar/biz  →  http://localhost:3000/abc123
 ```
 
-**Stack:** React + Next.js (TypeScript) · NestJS (TypeScript) · Prisma · PostgreSQL · Docker
+**Stack:** React + Next.js (TypeScript) · NestJS (TypeScript) · Prisma · PostgreSQL · Redis · Docker
+
+The required URL-shortener functionality is implemented, with optional scaling
+and observability modes included to show how the system behaves beyond a single
+local instance.
+
+## Suggested Review Path
+
+1. Run **Base Mode** from [How to Run Locally](#how-to-run-locally).
+2. Exercise the [Quick API Smoke Test](#quick-api-smoke-test).
+3. Check the [Requirements checklist](#requirements-checklist).
+4. Read [Implementation notes](docs/IMPLEMENTATION.md) and
+   [Scaling plan](docs/SCALING.md) for design tradeoffs and growth paths.
 
 ---
 
-## Run it
+## How to Run Locally
 
-The only prerequisite is Docker.
+The only prerequisite is Docker. The compose files are split into one default
+application stack plus two optional overlays, which can also be combined:
+
+| Mode | Command shape | What it starts |
+|---|---|---|
+| **1. Base mode** | `docker compose up --build` | The app: Postgres, PgBouncer, Redis, migrations, backend, frontend |
+| **2. Scale mode** | add `-f docker-compose.scale.yml --scale backend=3` | Base stack plus nginx load balancing multiple backend replicas |
+| **3. Observability mode** | add `-f docker-compose.observability.yml` | Base stack plus Prometheus, Grafana, Postgres exporter, PgBouncer exporter |
+| **4. Compound mode** | add both overlays | Scale mode and Observability mode together |
+
+The overlays compose cleanly, so you can also run scale and observability
+together.
+
+### 1. Base Mode
+
+#### 1.1 Start
 
 ```bash
 git clone <this-repo>
@@ -23,41 +50,82 @@ cp .env.example .env        # then edit the credentials
 docker compose up --build
 ```
 
-| What | Where |
-|------|-------|
-| **App & short links** | <http://localhost:3000> |
-| API root — lists every endpoint | <http://localhost:4000/api/v1> |
-| API docs (Swagger) | <http://localhost:4000/api/v1/docs> |
-| Health probe | <http://localhost:4000/api/v1/health/ready> |
+#### 1.2 URLs
+
+| What | Mode | Where |
+|------|------|-------|
+| **App & short links** | Base | <http://localhost:3000> |
+| API root — lists every endpoint | Base | <http://localhost:4000/api/v1> |
+| API docs (Swagger) | Base | <http://localhost:4000/api/v1/docs> |
+| Health probe | Base | <http://localhost:4000/api/v1/health/ready> |
 
 Migrations run automatically. Nothing else to configure.
+
+#### 1.3 Containers
+
+| Container | Mode | Role |
+|---|---|---|
+| `shortener-postgres` | Base | PostgreSQL data store |
+| `shortener-pgbouncer` | Base | Transaction-pooling connection proxy for Prisma |
+| `shortener-redis` | Base | Shared rate-limit counters and runtime override flags |
+| `shortener-setup-db` | Base | One-shot Prisma migration job |
+| backend replica | Base | NestJS API on port 4000 |
+| `shortener-frontend` | Base | Next.js frontend and short-link entry point |
 
 **Try it:** shorten a URL on the home page, click the short link, then open
 `/dashboard` — the visit count moves. The database starts empty by design, so
 everything you see is real traffic.
 
-### What `docker compose up` starts
+#### 1.4 What `docker compose up` starts
 
-**Six services — the application.** Postgres, PgBouncer, Redis, a one-shot
-migration job, one backend and the frontend. No load balancer; the backend
-publishes port 4000 itself.
+| Included by default | Why |
+|---|---|
+| Postgres | Persistent storage for users, links and visits |
+| PgBouncer | Protects Postgres from per-replica Prisma connection pools |
+| Redis | Shared rate-limit counters and runtime override flags |
+| One-shot migration job | Applies Prisma migrations exactly once before the API starts |
+| One backend | Publishes API port `4000` directly in base mode |
+| Frontend | Serves the app and short-link route on port `3000` |
 
-**Scaling and monitoring are optional add-ons, not the default.** They live in
-separate compose overlays you opt into, because someone running this for the
-first time should get an application, not a platform. Details in the two
-sections below.
+The default command gives a reviewer the application, not a local platform.
+Details for the optional overlays are below.
 
 <details>
-<summary><b>Optional: run several API replicas</b></summary>
+<summary><b>2. Scale Mode</b></summary>
 
-The API is built to scale horizontally. Layering on `docker-compose.scale.yml`
-drops the backend's port mapping and puts nginx in front, so replicas can share
-the host port:
+Starts nginx as a local load balancer and runs multiple backend replicas.
+
+#### 2.1 Start
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.scale.yml \
-  up -d --build --scale backend=3
+docker compose \
+    -f docker-compose.yml \
+    -f docker-compose.scale.yml \
+    up -d --build --scale backend=3
 ```
+
+#### 2.2 URLs
+
+| What | Mode | Where |
+|------|------|-------|
+| **App & short links** | Base | <http://localhost:3000> |
+| API root — served through nginx | Scale | <http://localhost:4000/api/v1> |
+| API docs (Swagger) | Scale | <http://localhost:4000/api/v1/docs> |
+| Load-balancer health probe | Scale | <http://localhost:4000/api/v1/health> |
+
+#### 2.3 Containers
+
+| Container | Mode | Role |
+|---|---|---|
+| `shortener-postgres` | Base | PostgreSQL data store |
+| `shortener-pgbouncer` | Base | Shared database connection pooler for all replicas |
+| `shortener-redis` | Base | Shared rate-limit counters and runtime override flags |
+| `shortener-setup-db` | Base | One-shot Prisma migration job |
+| `shortener-frontend` | Base | Next.js frontend and short-link entry point |
+| backend replicas | Scale | Multiple NestJS API instances, no published host port |
+| `shortener-lb` | Scale | nginx load balancer that owns port `4000` |
+
+#### 2.4 Scaling Behavior
 
 Everything that makes replicas *correct* — Redis-backed rate limiting, the
 one-shot migration job, PgBouncer — is in the base stack already, because those
@@ -74,29 +142,100 @@ the role. It stands in so `--scale` is demonstrable locally.)*
 </details>
 
 <details>
-<summary><b>Optional: Prometheus + Grafana</b></summary>
+<summary><b>3. Observability Mode</b></summary>
+
+Starts Prometheus, Grafana, and database/pool exporters.
+
+#### 3.1 Start
+
+```bash
+docker compose \
+    -f docker-compose.yml \
+    -f docker-compose.observability.yml \
+    up -d
+```
+
+#### 3.2 URLs
+
+| What | Mode | Where |
+|------|------|-------|
+| **App & short links** | Base | <http://localhost:3000> |
+| API metrics endpoint | Base | <http://localhost:4000/api/v1/metrics> |
+| Prometheus | Observability | <http://localhost:9090> — targets, alerts, PromQL |
+| Grafana | Observability | <http://localhost:3001> — `admin` / `admin` |
+
+#### 3.3 Containers
+
+| Container | Mode | Role |
+|---|---|---|
+| `shortener-postgres` | Base | PostgreSQL data store |
+| `shortener-pgbouncer` | Base | Transaction-pooling connection proxy for Prisma |
+| `shortener-redis` | Base | Shared rate-limit counters and runtime override flags |
+| `shortener-setup-db` | Base | One-shot Prisma migration job |
+| backend replica | Base | NestJS API on port 4000 |
+| `shortener-frontend` | Base | Next.js frontend and short-link entry point |
+| `shortener-prometheus` | Observability | Scrapes app, Postgres and PgBouncer metrics |
+| `shortener-grafana` | Observability | Dashboard UI, provisioned from files |
+| `shortener-postgres-exporter` | Observability | PostgreSQL server metrics |
+| `shortener-pgbouncer-exporter` | Observability | PgBouncer pool saturation metrics |
+
+#### 3.4 Metrics Behavior
 
 The backend exposes `GET /api/v1/metrics` in Prometheus format from the **base**
 image — instrumentation is part of the application. The stack that *collects* it
-is opt-in:
-
-```bash
-docker compose -f docker-compose.yml \
-               -f docker-compose.observability.yml up -d
-```
-
-| | |
-|---|---|
-| Prometheus | <http://localhost:9090> — targets, alerts, PromQL |
-| Grafana | <http://localhost:3001> — `admin` / `admin` |
+is opt-in.
 
 Composable with the scaling overlay to watch several replicas at once. Prometheus
 discovers each replica by DNS and scrapes them **individually** — scraping through
 nginx would round-robin every scrape to a different replica and make `rate()`
 meaningless.
 
-The Grafana datasource is provisioned; dashboards are deliberately not. See
+The Grafana datasource and dashboards are provisioned from files under
+`observability/grafana/provisioning`. See
 [`docs/IMPLEMENTATION.md` §12](docs/IMPLEMENTATION.md#12-observability).
+
+</details>
+
+<details>
+<summary><b>4. Compound Mode</b></summary>
+
+Starts Base Mode with Scale Mode as well as Observability Mode together.
+
+#### 4.1 Start
+
+```bash
+docker compose \
+    -f docker-compose.yml \
+    -f docker-compose.scale.yml \
+    -f docker-compose.observability.yml \
+    up -d --build --scale backend=3
+```
+
+#### 4.2 URLs
+
+| What | Mode | Where |
+|------|------|-------|
+| **App & short links** | Base | <http://localhost:3000> |
+| API root — served through nginx | Scale | <http://localhost:4000/api/v1> |
+| API metrics endpoint | Base | <http://localhost:4000/api/v1/metrics> |
+| Prometheus | Observability | <http://localhost:9090> — targets, alerts, PromQL |
+| Grafana | Observability | <http://localhost:3001> — `admin` / `admin` |
+
+#### 4.3 Containers
+
+| Container | Mode | Role |
+|---|---|---|
+| base infrastructure | Base | Postgres, PgBouncer, Redis and the one-shot migration job |
+| `shortener-frontend` | Base | Next.js frontend and short-link entry point |
+| backend replicas | Scale | Multiple NestJS API instances, no published host port |
+| `shortener-lb` | Scale | nginx load balancer that owns port `4000` |
+| observability containers | Observability | Prometheus, Grafana, Postgres exporter and PgBouncer exporter |
+
+#### 4.4 Compound Behavior
+
+This is the best compound mode for validating horizontal scaling and metrics
+together. Prometheus scrapes backend replicas individually rather than through
+nginx, so per-replica counters and request rates remain meaningful.
 
 </details>
 
@@ -104,16 +243,15 @@ The Grafana datasource is provisioned; dashboards are deliberately not. See
 
 ## Documentation
 
-🚀 **[Developer guide →](docs/DEVELOPER_GUIDE.md)** — **start here.** Quickstart, the
-four run modes, code map, testing, troubleshooting.
+🚀 **[Developer guide →](docs/DEVELOPER_GUIDE.md)** — code map, testing, development
+workflow, and troubleshooting.
 
-📋 **[Reference →](docs/REFERENCE.md)** — env vars, endpoints, schema, Redis keys, metrics.
+📋 **[Reference →](docs/REFERENCE.md)** — env vars, endpoints, schema, Redis keys, metrics, and ports.
 
 📖 **[Implementation notes →](docs/IMPLEMENTATION.md)** — architecture, data model, and
-the reasoning behind each design decision.
+the reasoning behind key design decisions.
 
-📈 **[Scaling plan →](docs/SCALING.md)** — what changes to run this across multiple
-nodes, ordered by when each bottleneck starts to hurt.
+📈 **[Scaling plan →](docs/SCALING.md)** — scaling limits, bottlenecks, and what changes as traffic grows.
 
 ---
 
@@ -138,18 +276,18 @@ Every item from the task description, and where it lives:
 | Visits to short URLs are tracked | ✅ | `Visit` table, written on every redirect |
 | Rate limiting against bad actors | ✅ | Per-route throttling, proxy-aware |
 | Dashboard showing popularity | ✅ | `/dashboard` — trend, breakdowns, top links |
-| Docker image of the application | ✅ | Multi-stage Dockerfiles + compose |
+| Docker images of the application | ✅ | Multi-stage Dockerfiles + compose |
 | React **with TypeScript** | ✅ | Strict mode, zero `any` |
 | Node.js **with TypeScript** | ✅ | NestJS, strict mode |
 
 **Beyond the brief:** live slug-availability checking, link search and sorting, per-link
 analytics pages, All-links / My-links scoping, analytics windows from 24 hours to 90 days,
 link expiry, reserved-slug protection, SSRF and stored-XSS guards, privacy-preserving IP
-hashing, health probes, Swagger docs, Prometheus metrics, and 246 unit tests.
+hashing, health probes, Swagger docs, Prometheus metrics, and 253 backend tests.
 
 ---
 
-## Try it
+## Quick API Smoke Test
 
 ```bash
 # Shorten a URL
@@ -170,9 +308,10 @@ curl -X POST http://localhost:4000/api/v1/links \
 
 ---
 
-## Local development (without Docker)
+## Native Development
 
-You need Node 20+ and a PostgreSQL instance.
+Use this when you want to run the backend and frontend directly on your machine
+instead of inside Docker. You need Node 20+ and a PostgreSQL instance.
 
 ```bash
 # 1. Database only
@@ -196,7 +335,7 @@ npm run dev
 
 ```bash
 # Backend
-npm test              # 246 unit tests
+npm test              # 253 backend tests
 npm run test:cov      # with coverage
 npm run typecheck     # tsc --noEmit
 npm run prisma:studio # browse the database
@@ -205,53 +344,3 @@ npm run prisma:studio # browse the database
 npm run build
 npm run typecheck
 ```
-
----
-
-## Project layout
-
-```
-.
-├── docker-compose.yml              Base: Postgres · PgBouncer · Redis · migrate · backend · frontend
-├── docker-compose.scale.yml        Overlay: nginx load balancer, for --scale backend=N
-├── docker-compose.observability.yml Overlay: Prometheus · Grafana · 2 exporters
-├── nginx/nginx.conf                Load balancer config (scaled mode only)
-├── observability/                  Prometheus scrape config, alert rules, Grafana provisioning
-├── docs/
-│   ├── DEVELOPER_GUIDE.md      Start here — quickstart, run modes, code map, testing
-│   ├── REFERENCE.md            Env vars, endpoints, schema, Redis keys, metrics
-│   ├── IMPLEMENTATION.md       Full technical write-up
-│   ├── SCALING.md              Scaling plan, phase by phase
-│   └── DeepOriginTaskDescription.pdf
-├── backend/                    NestJS API
-│   ├── prisma/schema.prisma    Data model (User, Link, Visit)
-│   └── src/
-│       ├── common/             Reusable utilities, guards, filters, decorators
-│       ├── config/             Typed configuration + env validation
-│       ├── auth/               JWT registration and login
-│       ├── links/              Create, list, update, delete
-│       ├── redirect/           Slug resolution (the hot path)
-│       ├── visits/             Click tracking
-│       └── analytics/          Dashboard aggregation
-└── frontend/                   Next.js App Router
-    └── src/
-        ├── app/                Routes, including [slug] and not-found
-        ├── components/         UI primitives, link views, charts
-        ├── hooks/              useClipboard, useAsync, useDebouncedValue
-        ├── lib/                API client, validators, formatters, types
-        └── providers/          Auth and toast context
-```
-
----
-
-## Notes
-
-- **Short links resolve on the frontend domain** (`localhost:3000/abc123`), matching the
-  `https://{domain}/abc123` shape in the brief. The Next.js catch-all route resolves the
-  slug server-side, so there is no intermediate page and JavaScript is not required.
-- **Redirects are 307, not 301.** Browsers cache permanent redirects indefinitely, which
-  would break slug editing and silently under-count visits.
-- **Anonymous use is a first-class path.** Shortening a URL never requires an account;
-  signing in adds ownership, editing and analytics on top.
-- The demo `JWT_SECRET` and `IP_HASH_SALT` in `docker-compose.yml` are for local use only.
-  The backend refuses to start in production with weak secrets.
