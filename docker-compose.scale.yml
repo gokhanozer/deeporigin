@@ -1,0 +1,56 @@
+# =============================================================================
+# Horizontal-scaling overlay — opt in when you want several API replicas.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.scale.yml \
+#     up -d --scale backend=3
+#
+# The base stack runs ONE backend that publishes port 4000 itself — the simplest
+# thing that works, and what `docker compose up -d` gives you.
+#
+# Scaling breaks that arrangement for one reason: a published host port can be
+# claimed by exactly one container, so N replicas cannot all bind 4000. This
+# overlay therefore does two things:
+#
+#   1. removes the backend's port mapping
+#   2. adds nginx to own port 4000 and fan requests across the replicas
+#
+# Everything that makes multiple replicas CORRECT rather than merely possible —
+# Redis-backed rate limiting, the one-shot migration job, PgBouncer — already
+# lives in the base file, because those are right at any replica count.
+#
+# NOTE: in a real deployment this nginx would not exist. A managed load balancer
+# (ALB, Cloud Load Balancer, an ingress controller) fills the role, with
+# redundancy and TLS termination you do not maintain. It stands in here so
+# `--scale` is demonstrable locally; a single nginx container is itself a
+# single point of failure and buys no availability.
+# =============================================================================
+
+services:
+  backend:
+    # `!reset` clears the value from the base file rather than merging with it.
+    # Without this the mapping would persist and the second replica would fail
+    # with "port is already allocated".
+    ports: !reset []
+
+  # ---------------------------------------------------------------------------
+  # Load balancer — the single host-facing entry point for the API
+  # ---------------------------------------------------------------------------
+  lb:
+    image: nginx:1.27-alpine
+    container_name: shortener-lb
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - '4000:4000'
+    volumes:
+      # See nginx/nginx.conf for why the upstream host must be held in a
+      # variable: a literal proxy_pass resolves once at startup and pins that
+      # IP, so new replicas would never receive traffic.
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:4000/api/v1/health || exit 1']
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s

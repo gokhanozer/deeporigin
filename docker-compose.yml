@@ -71,6 +71,68 @@ services:
       start_period: 10s
 
   # ---------------------------------------------------------------------------
+  # PgBouncer — connection pooler in front of Postgres
+  # ---------------------------------------------------------------------------
+  # Prisma opens a pool PER PROCESS (cpus*2+1 ≈ 25 here). Postgres allows 100
+  # connections, minus 3 reserved for superusers. So without pooling:
+  #
+  #     3 replicas × 25 = 75   (77% of budget)
+  #     4 replicas × 25 = 100  → connections refused, which presents as a
+  #                              total outage rather than a slowdown
+  #
+  # Pools are lazy, so this stays invisible at idle and breaks under load — the
+  # worst possible failure timing. PgBouncer multiplexes the replicas' many
+  # client connections onto a small set of real ones.
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    container_name: shortener-pgbouncer
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: ${POSTGRES_PORT:-5433}
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: ${POSTGRES_DB}
+
+      # Transaction pooling: a backend connection is returned to the pool at the
+      # end of each transaction rather than each session. This is what gives the
+      # multiplexing — and what forces `?pgbouncer=true` on the Prisma URL and
+      # the separate `directUrl` for migrations.
+      POOL_MODE: transaction
+
+      # Clients PgBouncer will accept (cheap — these are just sockets).
+      MAX_CLIENT_CONN: 500
+      # Real Postgres connections per database/user pair (the scarce resource).
+      # 20 serves all replicas, versus 25 for a single unpooled replica.
+      DEFAULT_POOL_SIZE: 20
+      MIN_POOL_SIZE: 5
+      RESERVE_POOL_SIZE: 5
+
+      # Postgres 16 stores passwords as SCRAM by default, so md5 (PgBouncer's
+      # default) would fail against the server.
+      AUTH_TYPE: scram-sha-256
+      LISTEN_PORT: 6432
+
+      # Grants access to PgBouncer's admin console (the virtual `pgbouncer`
+      # database), which is where SHOW POOLS / SHOW STATS live. Without this,
+      # the console answers "FATAL: not allowed" — including to the metrics
+      # exporter. STATS_USERS is read-only, which is what an exporter should
+      # have; ADMIN_USERS additionally permits RELOAD/PAUSE and is set so the
+      # console is usable by hand during an incident.
+      STATS_USERS: ${POSTGRES_USER}
+      ADMIN_USERS: ${POSTGRES_USER}
+    healthcheck:
+      # PgBouncer's admin console answers on the same port once it is listening.
+      test: ['CMD-SHELL', 'nc -z 127.0.0.1 6432 || exit 1']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
   # Redis — shared state across backend replicas
   # ---------------------------------------------------------------------------
   # Rate-limit counters live here rather than in each process's memory. With the
@@ -81,9 +143,12 @@ services:
     image: redis:7-alpine
     container_name: shortener-redis
     restart: unless-stopped
-    # `--appendonly no`: this data is a cache and a set of short-lived counters.
-    # Losing it on restart costs one rate-limit window, so paying for disk
-    # persistence on every write would be waste.
+    # `--appendonly no` disables AOF: fsyncing every counter increment would be
+    # waste for data that is a cache plus short-lived counters. RDB snapshotting
+    # stays enabled, so rate-limit OVERRIDES do survive restarts in practice
+    # (verified against both a graceful restart and a SIGKILL) — durability is
+    # windowed rather than guaranteed, which is the right trade here: losing an
+    # override fails safe back to the configured default.
     command: ['redis-server', '--appendonly', 'no', '--maxmemory-policy', 'allkeys-lru']
     healthcheck:
       test: ['CMD', 'redis-cli', 'ping']
@@ -104,32 +169,42 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: shortener-migrate
+    container_name: shortener-setup-db
     # Run to completion once; never restart.
     restart: 'no'
     depends_on:
       postgres:
         condition: service_healthy
     environment:
+      # Migrations connect STRAIGHT to Postgres, bypassing PgBouncer entirely.
+      # `migrate deploy` takes a session-level advisory lock, which transaction
+      # pooling breaks — the LOCK and UNLOCK can land on different backend
+      # connections. Both variables point at Postgres directly so Prisma uses
+      # the direct path whichever one it reads.
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:${POSTGRES_PORT:-5433}/${POSTGRES_DB}?schema=public
+      DIRECT_DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:${POSTGRES_PORT:-5433}/${POSTGRES_DB}?schema=public
     command: ['npx', 'prisma', 'migrate', 'deploy']
 
   # ---------------------------------------------------------------------------
-  # NestJS API — horizontally scalable
+  # NestJS API
   # ---------------------------------------------------------------------------
-  # Deliberately has NO container_name and NO published port. Both would pin a
-  # unique resource to a single container and make `--scale backend=3` fail.
-  # Compose auto-names replicas, and nginx (below) owns the host port.
+  # Publishes port 4000 directly — the simple, single-instance arrangement.
   #
-  #   docker compose up -d --scale backend=3
+  # Deliberately has NO `container_name`: that would pin a unique name to one
+  # container and block replication outright. To run several replicas, layer on
+  # docker-compose.scale.yml, which drops this port mapping (only one container
+  # can own a host port) and puts nginx in front:
+  #
+  #   docker compose -f docker-compose.yml -f docker-compose.scale.yml \
+  #     up -d --scale backend=3
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
     restart: unless-stopped
     depends_on:
-      postgres:
-        # Wait for Postgres to accept connections, not just to have started.
+      pgbouncer:
+        # Runtime queries go through the pooler, so wait for it — not Postgres.
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -142,11 +217,20 @@ services:
       PORT: 4000
       API_PREFIX: api/v1
 
-      # Assembled from the same .env values that initialise the database, so the
-      # credentials cannot drift apart. `postgres` is the compose service name,
-      # resolved over the project network, on the port Postgres actually listens
-      # on (set via its `command:`).
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:${POSTGRES_PORT:-5433}/${POSTGRES_DB}?schema=public
+      # Runtime queries go through PgBouncer, NOT straight to Postgres.
+      #
+      #   pgbouncer=true    — stops Prisma reusing named prepared statements,
+      #                       which transaction pooling would break
+      #   connection_limit  — each replica keeps a SMALL pool to PgBouncer;
+      #                       PgBouncer then multiplexes onto its own 20
+      #
+      # Credentials come from the same .env values that initialise the database,
+      # so they cannot drift apart.
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@pgbouncer:6432/${POSTGRES_DB}?schema=public&pgbouncer=true&connection_limit=10
+
+      # Present so the schema's `directUrl` always resolves; unused by Prisma
+      # Client at runtime, which only ever reads `url`.
+      DIRECT_DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:${POSTGRES_PORT:-5433}/${POSTGRES_DB}?schema=public
 
       # Shared rate-limit counters. Without this every replica would keep its
       # own, and the configured limits would be multiplied by the replica count.
@@ -167,39 +251,21 @@ services:
       BCRYPT_ROUNDS: 10
 
       SLUG_LENGTH: 7
+
+      # DEFAULT rate limits. Each can be overridden at runtime through a
+      # Redis feature flag, with no restart and across every replica at once:
+      #   redis-cli SET ratelimit:override:create '{"limit":2}'
+      #   redis-cli DEL ratelimit:override:create
+      # See docs/IMPLEMENTATION.md §10 "Runtime overrides".
       RATE_LIMIT_WINDOW_MS: 60000
       RATE_LIMIT_MAX: 100
       RATE_LIMIT_CREATE_MAX: 10
       RATE_LIMIT_AUTH_MAX: 5
-    # No `ports:` — nginx owns the host port. Replicas still reach each other
-    # and the frontend over the project network on port 4000.
-    #
-    # No migration step here any more: the `migrate` service ran it once, and
-    # `depends_on` guarantees it finished before this container starts.
-    command: ['node', 'dist/main.js']
-
-  # ---------------------------------------------------------------------------
-  # Load balancer — the single host-facing entry point for the API
-  # ---------------------------------------------------------------------------
-  # Publishes 4000 and fans requests across every backend replica via Docker's
-  # embedded DNS. This is what lets the backend scale: only one container can
-  # own a published host port, so it cannot be the backend itself.
-  lb:
-    image: nginx:1.27-alpine
-    container_name: shortener-lb
-    restart: unless-stopped
-    depends_on:
-      - backend
     ports:
       - '4000:4000'
-    volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-    healthcheck:
-      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:4000/api/v1/health || exit 1']
-      interval: 10s
-      timeout: 3s
-      retries: 5
-      start_period: 10s
+    # No migration step here: the `migrate` service ran it once, and `depends_on`
+    # guarantees it finished before this container starts.
+    command: ['node', 'dist/main.js']
 
   # ---------------------------------------------------------------------------
   # Next.js frontend (also serves the short links)

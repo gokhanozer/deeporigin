@@ -1,0 +1,75 @@
+# =============================================================================
+# Alert rules.
+#
+# Deliberately few. An alert that does not correspond to a human action is
+# noise, and noisy alerting trains people to ignore the channel — so each rule
+# below names something a person would actually get up for.
+# =============================================================================
+
+groups:
+  - name: shortener
+    interval: 30s
+    rules:
+      # ---- Availability -----------------------------------------------------
+      - alert: BackendReplicaDown
+        expr: up{job="shortener-backend"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Backend replica {{ $labels.instance }} is not responding'
+          description: 'Prometheus has failed to scrape this replica for 1 minute.'
+
+      # ---- Latency: the redirect is the product ------------------------------
+      - alert: RedirectLatencyHigh
+        # p99 over 250ms means users feel the delay on every shared link. This
+        # is also the trigger metric for Phase 3 (the Redis slug cache) in
+        # docs/SCALING.md — the alert and the roadmap agree on the threshold.
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (le) (rate(shortener_redirect_duration_seconds_bucket[5m]))
+          ) > 0.25
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Redirect p99 above 250ms'
+          description: 'Consider enabling the slug cache — see docs/SCALING.md Phase 3.'
+
+      # ---- Errors -----------------------------------------------------------
+      - alert: VisitWritesFailing
+        # recordVisit is fire-and-forget, so failures are silent by design.
+        # Without this rule, click tracking could break entirely and nobody
+        # would learn about it until the dashboard looked wrong.
+        expr: rate(shortener_visit_record_failed_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Visit writes are failing'
+          description: 'Redirects still work, but click analytics are being lost.'
+
+      # ---- Abuse / saturation ------------------------------------------------
+      - alert: RateLimitRejectionSpike
+        # A sustained rejection rate is either an attack or a limit set too low.
+        # Both need a human to look; the bucket label says which is likelier.
+        expr: sum by (bucket) (rate(shortener_rate_limit_rejected_total[5m])) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Sustained 429s on the {{ $labels.bucket }} bucket'
+          description: 'Either abuse, or a limit that needs raising via a Redis override.'
+
+      # ---- Capacity ----------------------------------------------------------
+      - alert: SlugKeyspaceFilling
+        # Collisions are near-zero until the keyspace saturates. A steady rate
+        # is the early warning to raise SLUG_LENGTH — long before creates fail.
+        expr: rate(shortener_slug_collision_total[30m]) > 0.1
+        for: 30m
+        labels:
+          severity: info
+        annotations:
+          summary: 'Generated-slug collisions rising'
+          description: 'Raise SLUG_LENGTH; the keyspace is filling up.'

@@ -1,0 +1,63 @@
+# =============================================================================
+# Prometheus scrape configuration.
+# =============================================================================
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  # ---------------------------------------------------------------------------
+  # The backend replicas
+  # ---------------------------------------------------------------------------
+  # CRITICAL: this targets the `backend` service directly, NOT the nginx load
+  # balancer. Scraping through the LB would round-robin each scrape to a
+  # different replica, so a counter would appear to jump backwards and forwards
+  # at random and every `rate()` calculation would be meaningless.
+  #
+  # `dns_sd_configs` with Docker's embedded DNS returns the A records for every
+  # replica, so Prometheus discovers and scrapes each one individually. Scaling
+  # up or down is picked up automatically on the refresh interval.
+  #
+  # Aggregate across replicas in PromQL instead, e.g.
+  #   sum by (route) (rate(http_request_duration_seconds_count[5m]))
+  - job_name: shortener-backend
+    metrics_path: /api/v1/metrics
+    dns_sd_configs:
+      - names: ['backend']
+        type: A
+        port: 4000
+        refresh_interval: 15s
+    relabel_configs:
+      # Keep the replica's address as an `instance` label so a single sick
+      # replica can be identified rather than hidden in the average.
+      - source_labels: [__address__]
+        target_label: instance
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — server-side metrics
+  # ---------------------------------------------------------------------------
+  # Single target: there is one database server, so no service discovery needed.
+  - job_name: postgres
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+
+  # ---------------------------------------------------------------------------
+  # PgBouncer — connection-pool metrics
+  # ---------------------------------------------------------------------------
+  # The authoritative view of pool saturation: how many client connections are
+  # waiting, and how many real server connections are in use. This is what says
+  # whether DEFAULT_POOL_SIZE needs raising.
+  - job_name: pgbouncer
+    static_configs:
+      - targets: ['pgbouncer-exporter:9127']
+
+  # ---------------------------------------------------------------------------
+  # Prometheus itself
+  # ---------------------------------------------------------------------------
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']

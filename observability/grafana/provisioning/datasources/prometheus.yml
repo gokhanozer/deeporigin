@@ -1,0 +1,27 @@
+# =============================================================================
+# Grafana datasource provisioning.
+#
+# Only the datasource is provisioned, not dashboards. Wiring Grafana to
+# Prometheus by hand is pure setup friction with no insight in it, so it is
+# automated; building the panels is the interesting part and is left to whoever
+# is exploring. `Explore` works immediately on first launch.
+# =============================================================================
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    # A FIXED uid, not one Grafana generates. Provisioned dashboards reference
+    # their datasource by uid, so letting it be random would mean every
+    # dashboard JSON broke on a fresh volume ("Datasource not found").
+    uid: prometheus
+    access: proxy
+    # Service name on the compose network — Grafana queries Prometheus
+    # server-to-server, so this is not a localhost URL.
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true
+    jsonData:
+      # Match the scrape interval so Grafana suggests sensible step sizes.
+      timeInterval: 15s
