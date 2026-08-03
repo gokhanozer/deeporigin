@@ -24,7 +24,8 @@ are stated along with the conditions under which the other option would win.
 12. [Observability](#12-observability)
 13. [Testing](#13-testing)
 14. [Docker and deployment](#14-docker-and-deployment)
-15. [Known limitations and next steps](#15-known-limitations-and-next-steps)
+15. [Interview trade-offs](#15-interview-trade-offs)
+16. [Known limitations and next steps](#16-known-limitations-and-next-steps)
 
 ---
 
@@ -230,6 +231,40 @@ a count the way a read-modify-write would.
 
 ### 5.1 Creating a short link
 
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant API as NestJS API
+    participant Links as LinksService
+    participant Slug as slug.util
+    participant DB as PostgreSQL
+
+    User->>API: POST /api/v1/links
+    API->>API: throttle, optional auth, DTO validation
+    API->>Links: create(dto, user?)
+    Links->>Links: validateUrl()
+    alt custom slug
+        Links->>Slug: validateSlug(slug)
+    else generated slug
+        Links->>Slug: generateSlug() using crypto.randomInt
+    end
+    Links->>DB: INSERT link(slug, targetUrl, ownerId?)
+    alt unique slug
+        DB-->>Links: Link row
+        Links-->>API: LinkDto
+        API-->>User: 201 { shortUrl, ... }
+    else generated slug collision
+        DB-->>Links: P2002 unique violation
+        Links->>Slug: generate a different slug
+        Links->>DB: retry INSERT
+    else custom slug collision
+        DB-->>Links: P2002 unique violation
+        Links-->>API: ConflictException
+        API-->>User: 409 slug already taken
+    end
+```
+
 ```
 POST /api/v1/links  { "url": "example.com/foo", "slug": "my-link"? }
   │
@@ -283,6 +318,35 @@ trailing slash. Query parameters are compared as written, so `?a=1&b=2` and
 The lookup is indexed on `(ownerId, targetUrl)`.
 
 ### 5.2 Following a short link
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Visitor
+    participant Web as Next.js /[slug]
+    participant API as NestJS API
+    participant Redirect as RedirectService
+    participant DB as PostgreSQL
+    participant Visits as VisitsService
+
+    Visitor->>Web: GET /abc123
+    Web->>API: POST /api/v1/redirect/abc123/resolve
+    API->>Redirect: resolve(slug, metadata)
+    Redirect->>DB: findUnique({ slug })
+    alt active and not expired
+        DB-->>Redirect: targetUrl + link id
+        Redirect-->>API: { targetUrl }
+        Redirect-->>Visits: recordVisit(...) asynchronously
+        Visits->>DB: INSERT visit + increment visitCount
+        API-->>Web: 201 { targetUrl }
+        Web-->>Visitor: 307 Location: targetUrl
+    else missing, inactive, or expired
+        DB-->>Redirect: no resolvable link
+        Redirect-->>API: NotFoundException
+        API-->>Web: 404
+        Web-->>Visitor: notFound()
+    end
+```
 
 ```
 GET http://localhost:3000/abc123
@@ -769,7 +833,7 @@ TypeScript, rather than issuing five separate `GROUP BY` queries. The reasoning:
   traffic rather than with table size.
 
 At genuinely large volumes this becomes the wrong trade — see
-[§15](#15-known-limitations-and-next-steps).
+[§16](#16-known-limitations-and-next-steps).
 
 Every dashboard query runs inside one transaction, so every number on screen describes the
 same instant.
@@ -1065,7 +1129,73 @@ queries, `directUrl` straight to Postgres for migrations and seeding.
 
 ---
 
-## 15. Known limitations and next steps
+## 15. Interview trade-offs
+
+These are the design choices most likely to be challenged in a principal-level
+review, with the short defense and the condition under which the other option
+would win.
+
+### Why Base62, not Base64URL?
+
+Base62 uses only letters and digits. That keeps generated slugs clean in chat,
+Markdown, terminals and browser address bars: no `-`, `_`, escaping concerns, or
+tool-specific double-click selection surprises. The cost is a slightly smaller
+alphabet than Base64URL, but at 7 characters the keyspace is still 62^7 ≈ 3.52
+trillion.
+
+Base64URL would be reasonable for purely machine-facing tokens where every
+character of density matters. Short links are user-visible, copied around, read
+aloud, and sometimes manually edited, so boring characters are a feature.
+
+### Why random slugs, not SHA-derived deterministic slugs?
+
+Hashing the target URL into the slug sounds attractive because the same URL
+always maps to the same code, but that property is also the problem:
+
+- it leaks that two users shortened the same destination;
+- it prevents separate campaigns for the same destination from having distinct
+  analytics;
+- it couples the slug to the original URL, making destination edits awkward;
+- it still needs collision handling once the hash is truncated to a human-sized
+  slug.
+
+This implementation uses random slugs and lets ownership rules decide whether an
+existing link can be reused. Anonymous users can reuse anonymous links; signed-in
+users reuse their own matching links; nobody is handed another user's link.
+
+### Why insert first instead of checking availability first?
+
+A pre-check is only advisory:
+
+```sql
+SELECT slug FROM links WHERE slug = 'abc123'; -- empty
+-- another request inserts abc123 here
+INSERT INTO links (...) VALUES (...);         -- still fails
+```
+
+The database unique index is the only race-free arbiter. Generated slugs are
+inserted optimistically and retried on `P2002`; custom slugs return `409` because
+silently substituting a different slug would violate the user's request.
+
+### What does the collision math actually say?
+
+There are two different questions:
+
+| Question | Meaning at 1B links, 7-char Base62 |
+|---|---|
+| Single insert collision risk | About 1B / 62^7 ≈ 0.028% for the next generated slug |
+| Cumulative birthday collision probability | Effectively certain that some collision has happened somewhere |
+
+The birthday paradox is why collision handling must exist. The single-insert
+risk is why retrying is cheap. Even at very large row counts, a collision means
+"generate another slug and try again," not "the system is unsafe."
+
+The trigger to raise `SLUG_LENGTH` is operational, not theoretical: sustained
+growth in `shortener_slug_collision_total`.
+
+---
+
+## 16. Known limitations and next steps
 
 Each is a scope decision, with the change that would resolve it.
 
