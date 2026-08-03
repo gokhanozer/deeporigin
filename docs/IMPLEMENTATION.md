@@ -972,12 +972,12 @@ OpenTelemetry spans would be the next addition, and are not built.
 
 ## 13. Testing
 
-**205 unit tests across 15 suites, all passing** — and they need no database or
+**222 unit tests across 16 suites, all passing** — and they need no database or
 Redis, which is why the whole run takes a few seconds.
 
 ```
-Test Suites: 15 passed, 15 total
-Tests:       205 passed, 205 total
+Test Suites: 16 passed, 16 total
+Tests:       222 passed, 222 total
 ```
 
 | Suite | Covers |
@@ -990,6 +990,7 @@ Tests:       205 passed, 205 total
 | `analytics/analytics.service.spec.ts` | Bucketing, gap-filling, owner scoping |
 | `auth/{auth.service,auth.controller}.spec.ts` | Hashing, token issue, and per-route throttle tags |
 | `common/rate-limit/rate-limit-override.service.spec.ts` | Redis overrides, cache, fail-open |
+| `config/configuration.spec.ts` | Boolean env parsing — `SWAGGER_ENABLED=false` must not read as `true` |
 | `app.e2e.spec.ts` | Bootstrap and the global pipeline |
 
 Coverage is concentrated where bugs would be expensive:

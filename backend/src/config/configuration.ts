@@ -20,6 +20,15 @@ export interface AppConfig {
   publicBaseUrl: string;
   /** Prefix applied to every API route (`/api/v1/...`). */
   apiPrefix: string;
+  /**
+   * Whether to mount the Swagger UI at `{apiPrefix}/docs`.
+   *
+   * Defaults to **off in production** — a public deployment should not publish
+   * a browsable, executable map of its own API. The demo compose stack sets
+   * `SWAGGER_ENABLED=true` explicitly, because there the docs *are* the point
+   * and the reviewer following the README should land on them rather than a 404.
+   */
+  swaggerEnabled: boolean;
   auth: {
     /** HMAC secret used to sign JWTs. */
     jwtSecret: string;
@@ -74,6 +83,25 @@ function envInt(value: string | undefined, fallback: number): number {
 }
 
 /**
+ * Reads a variable as a boolean, falling back when unset or empty.
+ *
+ * Only the exact strings `true`/`1` and `false`/`0` (any case) are honoured;
+ * anything else falls back. This is deliberate — `Boolean('false')` is `true`
+ * in JavaScript, and trusting the truthiness of an env string is precisely the
+ * bug that made `?mineOnly=false` behave as `true`.
+ *
+ * @param value    Raw environment value (may be `undefined`).
+ * @param fallback Value to use when unset, empty or unrecognised.
+ * @returns The parsed boolean.
+ */
+function envBool(value: string | undefined, fallback: boolean): boolean {
+  const normalised = value?.trim().toLowerCase();
+  if (normalised === 'true' || normalised === '1') return true;
+  if (normalised === 'false' || normalised === '0') return false;
+  return fallback;
+}
+
+/**
  * Reads a comma-separated variable into a trimmed, non-empty string array.
  *
  * @param value    Raw environment value, e.g. `"http://a.com, http://b.com"`.
@@ -94,12 +122,16 @@ function envList(value: string | undefined, fallback: string[]): string[] {
  *
  * @returns The resolved {@link AppConfig} for this process.
  */
-export const configuration = (): AppConfig => ({
+export const configuration = (): AppConfig => {
+  const nodeEnv = process.env.NODE_ENV ?? 'development';
+
+  return {
   port: envInt(process.env.PORT, 4000),
-  nodeEnv: process.env.NODE_ENV ?? 'development',
+  nodeEnv,
   corsOrigins: envList(process.env.CORS_ORIGINS, ['http://localhost:3000']),
   publicBaseUrl: (process.env.PUBLIC_BASE_URL ?? 'http://localhost:3000').replace(/\/+$/, ''),
   apiPrefix: process.env.API_PREFIX ?? 'api/v1',
+  swaggerEnabled: envBool(process.env.SWAGGER_ENABLED, nodeEnv !== 'production'),
   auth: {
     jwtSecret: process.env.JWT_SECRET ?? 'dev-only-insecure-secret-change-me',
     jwtExpiresIn: process.env.JWT_EXPIRES_IN ?? '7d',
@@ -125,4 +157,5 @@ export const configuration = (): AppConfig => ({
     createLimit: envInt(process.env.RATE_LIMIT_CREATE_MAX, 10),
     authLimit: envInt(process.env.RATE_LIMIT_AUTH_MAX, 5),
   },
-});
+  };
+};

@@ -41,6 +41,7 @@ database with an empty password.
 | `NODE_ENV` | `development` | `production` enables extra hardening |
 | `PORT` | `4000` | HTTP port |
 | `API_PREFIX` | `api/v1` | Route prefix |
+| `SWAGGER_ENABLED` | off when `NODE_ENV=production`, else on | Mounts the Swagger UI at `{API_PREFIX}/docs`. The compose stack sets it `true` so the demo serves docs despite running in production mode |
 | `CORS_ORIGINS` | `http://localhost:3000` | Comma-separated allowed browser origins |
 | `PUBLIC_BASE_URL` | `http://localhost:3000` | Base used to build short URLs |
 | `JWT_SECRET` | dev value | **Required in production**, ≥16 chars |
@@ -73,7 +74,9 @@ database with an empty password.
 
 ## API endpoints
 
-Base path `/api/v1`. Swagger at `/api/v1/docs` (non-production only).
+Base path `/api/v1`. Swagger at `/api/v1/docs`, controlled by `SWAGGER_ENABLED`
+— on by default outside production, and switched on explicitly in the compose
+stack so the demo serves it.
 
 ### Auth
 
