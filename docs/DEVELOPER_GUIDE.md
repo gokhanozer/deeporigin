@@ -46,7 +46,7 @@ Migrations run automatically. You should now have:
 | | |
 |---|---|
 | App | <http://localhost:3000> |
-| API | <http://localhost:4000/api/v1> |
+| API root — lists every endpoint | <http://localhost:4000/api/v1> |
 | Swagger | <http://localhost:4000/api/v1/docs> |
 | Health | <http://localhost:4000/api/v1/health/ready> |
 
@@ -214,7 +214,7 @@ frontend/src/
 
 ```bash
 cd backend
-npm test                 # 222 tests, ~4s
+npm test                 # 229 tests, ~4s
 npm run test:cov         # with coverage
 npm test -- slug.util    # one file
 npm run typecheck        # tsc --noEmit
@@ -222,7 +222,7 @@ npm run typecheck        # tsc --noEmit
 
 From the repo root, `npm test` and `npm run typecheck` cover both apps.
 
-**What is tested:** 16 backend suites — the pure utilities (slug, url, date,
+**What is tested:** 17 backend suites — the pure utilities (slug, url, date,
 pagination, user-agent), the services (links, redirect, visits, analytics, auth,
 rate-limit overrides), DTO transformation, and one e2e spec.
 
