@@ -288,6 +288,102 @@ visits per window it is an out-of-memory crash.
 
 ---
 
+### 2.4 `GET /links` counts the whole table on every request
+
+**Breaks:**
+
+```ts
+const [links, total] = await this.prisma.$transaction([
+  this.prisma.link.findMany({ where, orderBy, skip, take }),
+  this.prisma.link.count({ where }),   // ← sequential scan
+]);
+```
+
+The page fetch is indexed and fast. The `count` beside it is a sequential scan
+that no index removes, and it runs on **every** list request — the public
+`/links` page and the home page, the two most-hit routes.
+
+Measured on synthetic data with the production schema:
+
+| Rows | Page-1 fetch | `COUNT(*)` | Count's share |
+|---|---|---|---|
+| 500,000 | 0.05 ms | 17 ms | 99.7% |
+| 5,000,000 | 0.6 ms | 191 ms | 99.7% |
+
+It grows linearly at roughly **38 ms per million rows**. Indexing the sort
+columns (done — see below) moved the bottleneck here and nowhere else.
+
+**Trigger:** ~1M links. Below that it is tens of milliseconds and not worth the
+API change; above it, it is the single dominant cost of the page.
+
+**Change:** one of two, both of which alter the API contract, which is why
+neither is done yet.
+
+1. **Estimate the unfiltered total.** `SELECT reltuples FROM pg_class WHERE
+   relname = 'links'` is O(1) and accurate to within a percent after `ANALYZE`.
+   Use it when no `search`/`mineOnly` filter is applied — which is the default
+   view, and the only one where the count is expensive. Filtered counts stay
+   exact because the filter already restricts the scan.
+2. **Drop exact totals.** Fetch `pageSize + 1` rows and return `hasNextPage`
+   instead of `totalPages`. Cheapest and most honest, but the UI loses "page 7
+   of 412".
+
+**Effort:** small for either. The work is in the frontend and the API contract,
+not the query.
+
+> **Deep pagination is *not* the problem here**, which is worth stating because
+> it is the usual suspect. With the sort indexes in place, page 10,000 of 5M
+> rows costs 41 ms and page 100,000 costs 452 ms — real, but nobody paginates
+> that deep, and the count above dominates long before `OFFSET` does. Keyset
+> pagination is the eventual fix and is not urgent.
+>
+> **Nor is page size.** At `LIMIT 10 / 50 / 100` the fetch measured
+> 0.021 / 0.026 / 0.033 ms. Rows are nearly free once the sort is indexed;
+> raising the page size is a UX decision with no meaningful performance effect
+> in either direction.
+
+---
+
+### 2.5 List sorts had no usable index ✅ DONE
+
+**Broke:** `LinksService.buildOrderBy` emits `ORDER BY <column> DESC, id ASC`.
+None of the original indexes matched that, so every unscoped list sorted the
+whole table to return ten rows.
+
+`links_ownerId_createdAt_idx` leads with `ownerId`, so it served "my links"
+(0.24 ms) but could do nothing for the unscoped "all links" view. Measured on
+5M rows, page 1:
+
+| Sort option | Before | After |
+|---|---|---|
+| Newest first *(default)* | 43 ms — parallel seq scan + top-N sort | **0.6 ms** |
+| Oldest first | 43 ms | 0.19 ms |
+| Most visited | 25 ms — `links_visitCount_idx` lacked the tiebreaker | sub-ms |
+| Recently visited | **573 ms — full sequential scan** | sub-ms |
+| My links | 0.24 ms — already indexed | unchanged |
+
+**Changed:** three indexes, migration `20260803190734_add_list_sort_indexes`.
+
+Two details decided whether they would be used at all, and both are easy to get
+wrong:
+
+- **The `id` tiebreaker must be in the index.** Without it the ORDER BY does not
+  match and Postgres sorts the table anyway.
+- **The leading column must be `DESC`.** The queries are `ORDER BY col DESC,
+  id ASC` — a *mixed* direction. An ascending index read backward yields
+  `(DESC, DESC)`, which does not match either, and Postgres recovers with an
+  incremental sort within each group of tied values. That is nearly free when
+  ties are rare and expensive when they are not: with 80% of rows sharing
+  `visitCount = 0` — the normal shape, since most links are never clicked — an
+  ascending index measured **148 ms against 10 ms** for the descending one.
+
+> `links_visitCount_idx` is now redundant: `links_visitCount_id_idx` is a
+> superset and serves every query the older index did. Dropping it would remove
+> a little write amplification. Left in place deliberately — it is a separate
+> decision from adding the new ones.
+
+---
+
 ## Tier 3 — infrastructure
 
 ### 3.1 Connection pool exhaustion ✅ DONE

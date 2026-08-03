@@ -191,7 +191,15 @@ User  ──1:N──▶  Link  ──1:N──▶  Visit
 |---|---|---|
 | `links` | `links_slug_key` **UNIQUE** | The redirect lookup; enforces slug uniqueness |
 | `links` | `links_ownerId_createdAt_idx` | "My links, newest first" |
-| `links` | `links_visitCount_idx` | Most-popular ranking |
+| `links` | `links_visitCount_idx` | Most-popular ranking (dashboard top-N) |
+| `links` | `links_createdAt_id_idx` | List sorted newest/oldest first — the default view |
+| `links` | `links_visitCount_id_idx` | List sorted by most visited |
+| `links` | `links_lastVisitedAt_id_idx` | List sorted by recently visited |
+
+> The three `*_id_idx` indexes lead **descending** and end in `id`. Both matter:
+> `buildOrderBy` emits `ORDER BY <col> DESC, id ASC`, and an index missing
+> either property is not used. See [`SCALING.md` §2.5](SCALING.md) for the
+> measurements.
 | `users` | `users_email_key` **UNIQUE** | Login |
 | `visits` | `visits_linkId_occurredAt_idx` | Per-link analytics windows |
 | `visits` | `visits_occurredAt_idx` | Global visits-over-time |
