@@ -17,6 +17,7 @@ import { RedisModule, REDIS_CLIENT } from './common/redis/redis.module';
 import { RateLimitOverrideService } from './common/rate-limit/rate-limit-override.service';
 import { MetricsModule } from './metrics/metrics.module';
 import { MetricsInterceptor } from './metrics/metrics.interceptor';
+import { AppController } from './app.controller';
 import { AnalyticsModule } from './analytics/analytics.module';
 import { AuthModule } from './auth/auth.module';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
@@ -81,6 +82,9 @@ import { VisitsModule } from './visits/visits.module';
     AnalyticsModule,
     HealthModule,
   ],
+  // The service index lives at the API prefix itself, so it belongs to the root
+  // module rather than to any feature module.
+  controllers: [AppController],
   providers: [
     // Resolves runtime rate-limit overrides from Redis. Injected into the guard.
     RateLimitOverrideService,

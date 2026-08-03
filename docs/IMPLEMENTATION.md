@@ -972,12 +972,12 @@ OpenTelemetry spans would be the next addition, and are not built.
 
 ## 13. Testing
 
-**222 unit tests across 16 suites, all passing** — and they need no database or
+**229 unit tests across 17 suites, all passing** — and they need no database or
 Redis, which is why the whole run takes a few seconds.
 
 ```
-Test Suites: 16 passed, 16 total
-Tests:       222 passed, 222 total
+Test Suites: 17 passed, 17 total
+Tests:       229 passed, 229 total
 ```
 
 | Suite | Covers |

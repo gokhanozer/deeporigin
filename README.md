@@ -26,7 +26,7 @@ docker compose up --build
 | What | Where |
 |------|-------|
 | **App & short links** | <http://localhost:3000> |
-| API | <http://localhost:4000/api/v1> |
+| API root — lists every endpoint | <http://localhost:4000/api/v1> |
 | API docs (Swagger) | <http://localhost:4000/api/v1/docs> |
 | Health probe | <http://localhost:4000/api/v1/health/ready> |
 
@@ -145,7 +145,7 @@ Every item from the task description, and where it lives:
 **Beyond the brief:** live slug-availability checking, link search and sorting, per-link
 analytics pages, All-links / My-links scoping, analytics windows from 24 hours to 90 days,
 link expiry, reserved-slug protection, SSRF and stored-XSS guards, privacy-preserving IP
-hashing, health probes, Swagger docs, Prometheus metrics, and 222 unit tests.
+hashing, health probes, Swagger docs, Prometheus metrics, and 229 unit tests.
 
 ---
 
@@ -196,7 +196,7 @@ npm run dev
 
 ```bash
 # Backend
-npm test              # 222 unit tests
+npm test              # 229 unit tests
 npm run test:cov      # with coverage
 npm run typecheck     # tsc --noEmit
 npm run prisma:studio # browse the database
