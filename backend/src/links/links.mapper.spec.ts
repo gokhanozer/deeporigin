@@ -7,7 +7,7 @@
  */
 
 import type { Link } from '@prisma/client';
-import { isLinkResolvable, toLinkDto, toLinkDtoList } from './links.mapper';
+import { canViewLinkAnalytics, isLinkResolvable, toLinkDto, toLinkDtoList } from './links.mapper';
 
 /**
  * Builds a link row for testing, with sensible defaults.
@@ -96,5 +96,46 @@ describe('isLinkResolvable', () => {
 
   it('treats the exact expiry instant as expired', () => {
     expect(isLinkResolvable({ isActive: true, expiresAt: now }, now)).toBe(false);
+  });
+
+  describe('canViewLinkAnalytics', () => {
+    it('lets anyone read an anonymous link\'s analytics', () => {
+      // Anonymous links are already listed publicly with their visit counts,
+      // so their breakdowns are not a secret either.
+      expect(canViewLinkAnalytics({ ownerId: null })).toBe(true);
+      expect(canViewLinkAnalytics({ ownerId: null }, 'user-1')).toBe(true);
+    });
+
+    it('lets an owner read their own link', () => {
+      expect(canViewLinkAnalytics({ ownerId: 'user-1' }, 'user-1')).toBe(true);
+    });
+
+    it('refuses another user', () => {
+      expect(canViewLinkAnalytics({ ownerId: 'user-1' }, 'user-2')).toBe(false);
+    });
+
+    it('refuses an anonymous viewer on an owned link', () => {
+      expect(canViewLinkAnalytics({ ownerId: 'user-1' })).toBe(false);
+    });
+  });
+
+  describe('canViewAnalytics on the DTO', () => {
+    it('is true for an anonymous link even to an anonymous viewer', () => {
+      // The case that made the UI wrong: isOwner is false here, but the
+      // analytics page loads fine, so gating the link on isOwner hid it.
+      const dto = toLinkDto(makeLink({ ownerId: null }), 'https://short.ly');
+      expect(dto.isOwner).toBe(false);
+      expect(dto.canViewAnalytics).toBe(true);
+    });
+
+    it('is false for another user\'s link', () => {
+      const dto = toLinkDto(makeLink({ ownerId: 'user-1' }), 'https://short.ly', 'user-2');
+      expect(dto.canViewAnalytics).toBe(false);
+    });
+
+    it('is true for the owner', () => {
+      const dto = toLinkDto(makeLink({ ownerId: 'user-1' }), 'https://short.ly', 'user-1');
+      expect(dto.canViewAnalytics).toBe(true);
+    });
   });
 });

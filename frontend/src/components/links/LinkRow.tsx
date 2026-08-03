@@ -13,6 +13,7 @@ import { CopyButton } from '../ui/CopyButton';
 import { Badge } from '../ui/Feedback';
 import { formatNumber, formatRelativeTime, pluralize, stripProtocol, truncateMiddle } from '../../lib/format';
 import { useToast } from '../../providers/ToastProvider';
+import { isExpired } from '../../lib/link-state';
 import type { Link } from '../../lib/types';
 
 export interface LinkRowProps {
@@ -31,7 +32,7 @@ export interface LinkRowProps {
  */
 export function LinkRow({ link, onEdit, onDelete }: LinkRowProps): React.JSX.Element {
   const { showSuccess } = useToast();
-  const isExpired = link.expiresAt !== null && new Date(link.expiresAt) <= new Date();
+  const expired = isExpired(link);
 
   return (
     <li className="flex flex-col gap-3 border-b border-border/70 px-4 py-4 last:border-b-0 sm:flex-row sm:items-center sm:gap-4">
@@ -49,7 +50,7 @@ export function LinkRow({ link, onEdit, onDelete }: LinkRowProps): React.JSX.Ele
 
           {link.isCustomSlug && <Badge tone="brand">custom</Badge>}
           {!link.isActive && <Badge tone="danger">disabled</Badge>}
-          {isExpired && <Badge tone="warning">expired</Badge>}
+          {expired && <Badge tone="warning">expired</Badge>}
         </div>
 
         {link.title && <p className="mt-1 truncate text-sm text-content">{link.title}</p>}

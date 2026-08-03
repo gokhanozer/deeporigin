@@ -12,9 +12,10 @@
 
 import NextLink from 'next/link';
 import { CopyButton } from '../ui/CopyButton';
-import { EmptyState } from '../ui/Feedback';
+import { Badge, EmptyState } from '../ui/Feedback';
 import { formatNumber, formatRelativeTime, stripProtocol, truncateMiddle } from '../../lib/format';
 import { useToast } from '../../providers/ToastProvider';
+import { isExpired } from '../../lib/link-state';
 import type { Link } from '../../lib/types';
 
 export interface TopLinksTableProps {
@@ -76,12 +77,40 @@ export function TopLinksTable({ links }: TopLinksTableProps): React.JSX.Element 
               className="border-b border-border/40 transition-colors last:border-b-0 hover:bg-surface-raised/40"
             >
               <td className="px-4 py-3">
-                <NextLink
-                  href={`/dashboard/links/${link.id}`}
-                  className="font-mono text-brand-hover hover:underline"
-                >
-                  /{link.slug}
-                </NextLink>
+                <div className="flex flex-wrap items-center gap-2">
+                  {/* On a dashboard the slug drills into that link's metrics.
+                      `canViewAnalytics` rather than `isOwner`, because anonymous
+                      links have no owner and their stats are public — gating on
+                      ownership would have hidden metrics that anyone may read.
+                      Viewers who genuinely cannot load the page follow the short
+                      link instead; either way the Destination column still opens
+                      the target URL. */}
+                  {link.canViewAnalytics ? (
+                    <NextLink
+                      href={`/dashboard/links/${link.id}`}
+                      className="font-mono text-brand-hover hover:underline"
+                      title={`View metrics for /${link.slug}`}
+                    >
+                      /{link.slug}
+                    </NextLink>
+                  ) : (
+                    <a
+                      href={link.shortUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="font-mono text-brand-hover hover:underline"
+                      title={`Open /${link.slug}`}
+                    >
+                      /{link.slug}
+                    </a>
+                  )}
+
+                  {/* Without these, a disabled or expired link sits at the top
+                      of "most popular" looking perfectly healthy. */}
+                  {link.isCustomSlug && <Badge tone="brand">custom</Badge>}
+                  {!link.isActive && <Badge tone="danger">disabled</Badge>}
+                  {isExpired(link) && <Badge tone="warning">expired</Badge>}
+                </div>
                 {link.title && <p className="mt-0.5 truncate text-xs text-subtle">{link.title}</p>}
               </td>
 
@@ -119,13 +148,17 @@ export function TopLinksTable({ links }: TopLinksTableProps): React.JSX.Element 
                 {formatRelativeTime(link.lastVisitedAt)}
               </td>
 
-              <td className="px-4 py-3 text-right">
-                <CopyButton
-                  value={link.shortUrl}
-                  size="sm"
-                  label=""
-                  onCopied={() => showSuccess('Copied to clipboard')}
-                />
+              <td className="px-4 py-3">
+                <div className="flex items-center justify-end gap-1">
+                  {/* Owners reach metrics by clicking the slug, so the only
+                      action left here is the one every row needs. */}
+                  <CopyButton
+                    value={link.shortUrl}
+                    size="sm"
+                    label=""
+                    onCopied={() => showSuccess('Copied to clipboard')}
+                  />
+                </div>
               </td>
             </tr>
           ))}

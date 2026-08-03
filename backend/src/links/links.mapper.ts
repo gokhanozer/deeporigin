@@ -46,6 +46,10 @@ export function toLinkDto(
     expiresAt: link.expiresAt,
     // `ownerId` itself is never exposed — only whether it matches the viewer.
     isOwner: Boolean(viewerId && link.ownerId === viewerId),
+    // Reported rather than re-derived by the client: `isOwner: false` covers
+    // both "someone else's link" (private) and "an anonymous link" (public),
+    // which need opposite treatment in the UI.
+    canViewAnalytics: canViewLinkAnalytics(link, viewerId),
     createdAt: link.createdAt,
     updatedAt: link.updatedAt,
   };
@@ -84,4 +88,28 @@ export function isLinkResolvable(
   if (!link.isActive) return false;
   if (link.expiresAt && link.expiresAt.getTime() <= now.getTime()) return false;
   return true;
+}
+
+/**
+ * Determines whether a viewer may read a link's analytics.
+ *
+ * Two cases qualify, and the second is easy to miss: an **anonymous** link has
+ * no owner to keep it private, and it is already listed publicly with its visit
+ * count, so its breakdowns are not a secret either. An **owned** link is
+ * private to its owner.
+ *
+ * Shared by the analytics endpoint, which enforces it, and the link mapper,
+ * which reports it — so the UI never offers a link to a page that would answer
+ * `403`, and never hides one that would have worked.
+ *
+ * @param link     The link to test.
+ * @param viewerId Requesting user's ID, if authenticated.
+ * @returns `true` when the viewer may read this link's analytics.
+ */
+export function canViewLinkAnalytics(
+  link: Pick<Link, 'ownerId'>,
+  viewerId?: string,
+): boolean {
+  if (!link.ownerId) return true;
+  return link.ownerId === viewerId;
 }

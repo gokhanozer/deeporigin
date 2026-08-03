@@ -205,6 +205,16 @@ export class LinkResponseDto {
   @ApiProperty()
   isOwner!: boolean;
 
+  /**
+   * `true` when the caller may read this link's analytics.
+   *
+   * Wider than {@link isOwner}: an anonymous link has no owner to keep it
+   * private, and is already listed publicly with its visit count, so anyone may
+   * read its breakdowns.
+   */
+  @ApiProperty()
+  canViewAnalytics!: boolean;
+
   @ApiProperty()
   createdAt!: Date;
 

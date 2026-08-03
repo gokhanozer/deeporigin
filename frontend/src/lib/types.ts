@@ -27,6 +27,14 @@ export interface Link {
   expiresAt: string | null;
   /** `true` when the signed-in user may edit or delete this link. */
   isOwner: boolean;
+  /**
+   * `true` when the viewer may open this link's analytics page.
+   *
+   * Wider than {@link Link.isOwner}: anonymous links have no owner and their
+   * stats are public. Reported by the API so the UI never has to re-derive the
+   * rule the API enforces.
+   */
+  canViewAnalytics: boolean;
   createdAt: string;
   updatedAt: string;
   /**
