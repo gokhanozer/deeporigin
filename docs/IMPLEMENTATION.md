@@ -234,34 +234,34 @@ a count the way a read-modify-write would.
 ```mermaid
 sequenceDiagram
     autonumber
-    actor User
-    participant API as NestJS API
-    participant Links as LinksService
-    participant Slug as slug.util
-    participant DB as PostgreSQL
+    actor U as User
+    participant A as NestJS API
+    participant L as LinksService
+    participant S as slug.util
+    participant D as PostgreSQL
 
-    User->>API: POST /api/v1/links
-    API->>API: throttle, optional auth, DTO validation
-    API->>Links: create(dto, user?)
-    Links->>Links: validateUrl()
+    U->>A: POST /api/v1/links
+    A->>A: Throttle, auth, DTO validation
+    A->>L: Create link
+    L->>L: Validate URL
     alt custom slug
-        Links->>Slug: validateSlug(slug)
+        L->>S: Validate requested slug
     else generated slug
-        Links->>Slug: generateSlug() using crypto.randomInt
+        L->>S: Generate slug with crypto.randomInt
     end
-    Links->>DB: INSERT link(slug, targetUrl, ownerId?)
+    L->>D: Insert link row
     alt unique slug
-        DB-->>Links: Link row
-        Links-->>API: LinkDto
-        API-->>User: 201 { shortUrl, ... }
+        D-->>L: Link row
+        L-->>A: Link DTO
+        A-->>U: 201 Created
     else generated slug collision
-        DB-->>Links: P2002 unique violation
-        Links->>Slug: generate a different slug
-        Links->>DB: retry INSERT
+        D-->>L: P2002 unique violation
+        L->>S: Generate a different slug
+        L->>D: Retry insert
     else custom slug collision
-        DB-->>Links: P2002 unique violation
-        Links-->>API: ConflictException
-        API-->>User: 409 slug already taken
+        D-->>L: P2002 unique violation
+        L-->>A: ConflictException
+        A-->>U: 409 slug already taken
     end
 ```
 
@@ -322,29 +322,29 @@ The lookup is indexed on `(ownerId, targetUrl)`.
 ```mermaid
 sequenceDiagram
     autonumber
-    actor Visitor
-    participant Web as Next.js /[slug]
-    participant API as NestJS API
-    participant Redirect as RedirectService
-    participant DB as PostgreSQL
-    participant Visits as VisitsService
+    actor V as Visitor
+    participant W as Next.js slug route
+    participant A as NestJS API
+    participant R as RedirectService
+    participant D as PostgreSQL
+    participant VS as VisitsService
 
-    Visitor->>Web: GET /abc123
-    Web->>API: POST /api/v1/redirect/abc123/resolve
-    API->>Redirect: resolve(slug, metadata)
-    Redirect->>DB: findUnique({ slug })
+    V->>W: GET /abc123
+    W->>A: POST resolve endpoint
+    A->>R: Resolve slug with metadata
+    R->>D: Find link by slug
     alt active and not expired
-        DB-->>Redirect: targetUrl + link id
-        Redirect-->>API: { targetUrl }
-        Redirect-->>Visits: recordVisit(...) asynchronously
-        Visits->>DB: INSERT visit + increment visitCount
-        API-->>Web: 201 { targetUrl }
-        Web-->>Visitor: 307 Location: targetUrl
+        D-->>R: Target URL and link id
+        R-->>A: Target URL
+        R-->>VS: Record visit asynchronously
+        VS->>D: Insert visit and increment visitCount
+        A-->>W: Target URL
+        W-->>V: 307 redirect
     else missing, inactive, or expired
-        DB-->>Redirect: no resolvable link
-        Redirect-->>API: NotFoundException
-        API-->>Web: 404
-        Web-->>Visitor: notFound()
+        D-->>R: No resolvable link
+        R-->>A: NotFoundException
+        A-->>W: 404
+        W-->>V: Not found page
     end
 ```
 
