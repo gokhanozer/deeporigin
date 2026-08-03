@@ -55,11 +55,18 @@ export default function HomePage(): React.JSX.Element {
 
         {/* ---- Recent links ----
             Shows the shortener actually working, and doubles as the public
-            "list of all URLs saved in the database". */}
+            "list of all URLs saved in the database".
+
+            The scope is a toggle rather than a consequence of being signed in.
+            Deciding silently meant signing in made the list you were reading
+            disappear, and left this the one page where the scope could not be
+            changed. It defaults to "mine" because you have usually just
+            shortened something and want to see it. */}
         <section className="mt-12">
           <LinkList
-            title={isAuthenticated ? 'Your recent links' : 'Recently shortened'}
-            mineOnly={isAuthenticated}
+            title="Recent links"
+            showScopeToggle
+            defaultScope="mine"
             refreshToken={refreshToken}
             emptyMessage="Shorten your first URL using the form above."
           />

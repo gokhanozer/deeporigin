@@ -43,6 +43,15 @@ export interface LinkListProps {
    * show, and the API rejects `mineOnly` without a token anyway.
    */
   showScopeToggle?: boolean;
+  /**
+   * Which side the scope toggle starts on, for signed-in users.
+   *
+   * Differs by page rather than being a global default: `/links` exists to show
+   * the whole database, while the home page is where you have just shortened
+   * something and want to see your own. Ignored when
+   * {@link LinkListProps.showScopeToggle} is not set.
+   */
+  defaultScope?: LinkScope;
   /** Heading above the list. */
   title?: string;
   /** Message shown when the list is empty. */
@@ -76,6 +85,7 @@ const PAGE_SIZE = 10;
 export function LinkList({
   mineOnly = false,
   showScopeToggle = false,
+  defaultScope = 'all',
   title = 'Links',
   emptyMessage = 'No links yet. Shorten one to get started.',
   refreshToken = 0,
@@ -87,7 +97,7 @@ export function LinkList({
   const [sortValue, setSortValue] = useState('newest');
   const [page, setPage] = useState(1);
   const [editing, setEditing] = useState<Link | null>(null);
-  const [scope, setScope] = useState<LinkScope>('all');
+  const [scope, setScope] = useState<LinkScope>(defaultScope);
 
   // The toggle is only offered to signed-in users, so it can only take control
   // of the scope for them. Everyone else keeps the caller's `mineOnly`.
@@ -106,14 +116,25 @@ export function LinkList({
   // server treats the request as anonymous.
   const effectiveMineOnly = requestedMineOnly && isAuthenticated;
 
-  // Signing out while viewing "My links" would otherwise leave the list asking
-  // for a scope the API rejects with 403. Fall back to "all".
+  // Signing out returns the toggle to this page's default, so the next sign-in
+  // starts where the page intends rather than inheriting the previous session's
+  // choice.
+  //
+  // Resetting to `defaultScope` rather than a hard-coded 'all' matters: on a
+  // page defaulting to "mine", an anonymous visitor starts at 'mine', and a
+  // hard-coded reset would clear it before they ever sign in — quietly undoing
+  // the default. Comparing against `defaultScope` also makes this a no-op in
+  // that case instead of a repeated set.
+  //
+  // Note this is about the visible toggle only. Asking the API for a scope it
+  // would reject is already impossible: `effectiveMineOnly` is ANDed with
+  // `isAuthenticated` above.
   useEffect(() => {
-    if (!isAuthenticated && scope === 'mine') {
-      setScope('all');
+    if (!isAuthenticated && scope !== defaultScope) {
+      setScope(defaultScope);
       setPage(1);
     }
-  }, [isAuthenticated, scope]);
+  }, [isAuthenticated, scope, defaultScope]);
 
   const debouncedSearch = useDebouncedValue(search, 350);
   const sort = SORT_OPTIONS.find((option) => option.value === sortValue) ?? SORT_OPTIONS[0];
