@@ -6,7 +6,9 @@
  *                     and signing in simply attaches ownership.
  *  • `GET  /links`  — optional too, so the public list works while an owner
  *                     still sees `isOwner: true` on their own rows.
- *  • mutations      — {@link JwtAuthGuard}: editing requires a proven identity.
+ *  • mutations      — {@link LinkOwnerAuthGuard}: editing requires a proven
+ *                     identity, and the rejection says to create a new link
+ *                     instead of leaving the caller at a bare `401`.
  */
 
 import {
@@ -26,7 +28,7 @@ import { ApiBearerAuth, ApiOperation, ApiQuery, ApiResponse, ApiTags } from '@ne
 import { ThrottleCreate } from '../common/decorators/throttle.decorators';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import type { PaginatedResult } from '../common/utils/pagination.util';
-import { JwtAuthGuard, OptionalJwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { LinkOwnerAuthGuard, OptionalJwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { LinksService } from './links.service';
 import {
   CreateLinkDto,
@@ -125,9 +127,10 @@ export class LinksController {
    * @returns The updated link.
    */
   @Patch(':id')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(LinkOwnerAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Update a link (including its slug)' })
+  @ApiResponse({ status: 401, description: 'Anonymous caller — links can only be edited by their owner' })
   @ApiResponse({ status: 403, description: 'Caller does not own the link' })
   @ApiResponse({ status: 409, description: 'Requested slug already taken' })
   update(
@@ -145,11 +148,12 @@ export class LinksController {
    * @param userId Authenticated owner's ID.
    */
   @Delete(':id')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(LinkOwnerAuthGuard)
   @ApiBearerAuth()
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Delete a link' })
   @ApiResponse({ status: 204, description: 'Deleted' })
+  @ApiResponse({ status: 401, description: 'Anonymous caller — links can only be deleted by their owner' })
   remove(@Param('id') id: string, @CurrentUser('id') userId: string): Promise<void> {
     return this.linksService.remove(id, userId);
   }

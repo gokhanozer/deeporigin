@@ -29,6 +29,11 @@ export interface Link {
   isOwner: boolean;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Set by `POST /links` when it returned a link the caller had already created
+   * for this URL, rather than creating a second one. Absent on reads.
+   */
+  alreadyExisted?: boolean;
 }
 
 /** An authenticated account. */

@@ -52,15 +52,25 @@ export class LinksService {
    *    another request could take the same slug. Letting the unique index reject
    *    the insert and retrying is the only race-free approach.
    *
+   * Shortening a URL that already has a matching link returns that link rather
+   * than creating a second one — see {@link findReusableLink} for how the match
+   * is scoped by ownership.
+   *
    * @param dto     Validated creation payload.
    * @param ownerId Authenticated user's ID, or `undefined` for an anonymous link.
-   * @returns The created link.
+   * @returns The created link, or an existing reusable one with
+   *          `alreadyExisted: true`.
    * @throws {BadRequestException} When the URL is not a valid public http(s) URL.
    * @throws {ConflictException}   When a requested custom slug is taken.
    */
   async create(dto: CreateLinkDto, ownerId?: string): Promise<LinkResponseDto> {
     const targetUrl = this.validateTargetUrl(dto.url);
     const expiresAt = this.parseExpiry(dto.expiresAt);
+
+    const reusable = await this.findReusableLink(dto, targetUrl, ownerId);
+    if (reusable) {
+      return { ...this.present(reusable, ownerId), alreadyExisted: true };
+    }
 
     const { slugLength, maxSlugGenerationAttempts } = this.config.get('links', { infer: true });
 
@@ -332,6 +342,52 @@ export class LinksService {
    * @param viewerId Requesting user's ID, if any.
    * @returns A Prisma filter.
    */
+  /**
+   * Finds an existing link for this URL that the caller can safely be given.
+   *
+   * Matching is scoped by ownership, and the two cases fall out of one filter:
+   *
+   *  • **Signed in** — matches only that user's own links. Handing over another
+   *    user's link would give the caller something they cannot edit, whose owner
+   *    can repoint or delete it after they have shared it, and whose analytics
+   *    would silently merge with theirs.
+   *  • **Anonymous** — matches only unowned links (`ownerId IS NULL`). These are
+   *    safe to share: nobody can edit or delete an anonymous link, because
+   *    `assertOwnership` rejects every caller when there is no owner.
+   *
+   * Only a bare request is reused. Asking for a custom slug, a title or an
+   * expiry means asking for something the existing link does not have, and
+   * silently returning it would drop part of the request.
+   *
+   * @param dto       The creation payload, checked for customising fields.
+   * @param targetUrl The normalised destination.
+   * @param ownerId   Authenticated user's ID, or `undefined` when anonymous.
+   * @returns The reusable link, or `null` when there is none or the request
+   *          does not qualify.
+   */
+  private async findReusableLink(
+    dto: CreateLinkDto,
+    targetUrl: string,
+    ownerId?: string,
+  ): Promise<Link | null> {
+    if (dto.slug || dto.title || dto.expiresAt) return null;
+
+    return this.prisma.link.findFirst({
+      where: {
+        // `?? null` is what makes an anonymous caller match unowned links only,
+        // and never a link belonging to a signed-in user.
+        ownerId: ownerId ?? null,
+        targetUrl,
+        // A dead link is not a usable answer. Returning a deactivated or expired
+        // link would hand back a short URL that does not redirect — worse than
+        // simply creating a fresh one.
+        isActive: true,
+        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
   private buildWhere(query: ListLinksQueryDto, viewerId?: string): Prisma.LinkWhereInput {
     const where: Prisma.LinkWhereInput = {};
 

@@ -214,7 +214,7 @@ frontend/src/
 
 ```bash
 cd backend
-npm test                 # 222 tests, ~4s
+npm test                 # 237 tests, ~4s
 npm run test:cov         # with coverage
 npm test -- slug.util    # one file
 npm run typecheck        # tsc --noEmit
@@ -222,7 +222,7 @@ npm run typecheck        # tsc --noEmit
 
 From the repo root, `npm test` and `npm run typecheck` cover both apps.
 
-**What is tested:** 16 backend suites — the pure utilities (slug, url, date,
+**What is tested:** 17 backend suites — the pure utilities (slug, url, date,
 pagination, user-agent), the services (links, redirect, visits, analytics, auth,
 rate-limit overrides), DTO transformation, and one e2e spec.
 
@@ -258,7 +258,7 @@ cd .. && docker compose up -d --build frontend
 
 **Then hard-refresh the browser** — `Cmd+Shift+R`, or DevTools → right-click
 reload → *Empty Cache and Hard Reload*. Rebuilding the container does not clear
-your tab's cached JavaScript, and this has cost real debugging time.
+your tab's cached JavaScript.
 
 ### Changing the database schema
 
@@ -343,10 +343,9 @@ Failures are logged at `WARN` (4xx) and `ERROR` (5xx):
 docker compose logs backend -f | grep -E "WARN|ERROR"
 ```
 
-> This is worth trusting now — it was not always. The interceptor previously read
-> the status before the exception filter set it, so **every failure logged as
-> `200`**. If instrumentation and observed behaviour ever disagree again,
-> distrust the instrumentation first.
+> The status in the log is the one the client received. If the logs and the
+> observed behaviour ever disagree, check the logs are reporting the real status
+> before assuming the client is wrong.
 
 ### Full reset
 

@@ -154,6 +154,11 @@ model Link {
   @@index([visitCount(sort: Desc), id])
   /// Serves the "recently visited" sort, previously a sequential scan.
   @@index([lastVisitedAt(sort: Desc), id])
+
+  /// Serves the re-shorten check in `LinksService.findOwnDuplicate`, which runs
+  /// on every authenticated create. Without it that lookup is a sequential scan
+  /// on the write path — the opposite of the point.
+  @@index([ownerId, targetUrl])
   @@map("links")
 }
 

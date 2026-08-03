@@ -90,10 +90,10 @@ stack so the demo serves it.
 
 | Method | Path | Auth | Description |
 |---|---|:--:|---|
-| `POST` | `/links` | optional | Create. Signed in ⇒ owned |
+| `POST` | `/links` | optional | Create. Signed in ⇒ owned. A URL that already has a matching link returns that link with `alreadyExisted: true` |
 | `GET` | `/links` | optional | List. `?mineOnly=true` scopes to caller |
 | `GET` | `/links/:id` | optional | Single link |
-| `PATCH` | `/links/:id` | ✅ owner | Update slug, URL, title, active flag, expiry |
+| `PATCH` | `/links/:id` | ✅ owner | Update slug, URL, title, active flag, expiry. Anonymous callers get `401` explaining to create a new link instead |
 | `DELETE` | `/links/:id` | ✅ owner | Delete link and its visits |
 | `GET` | `/links/slug-available/:slug` | — | Live availability check |
 
