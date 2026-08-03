@@ -96,10 +96,10 @@ stack so the demo serves it.
 
 | Method | Path | Auth | Description |
 |---|---|:--:|---|
-| `POST` | `/links` | optional | Create. Signed in ⇒ owned |
+| `POST` | `/links` | optional | Create. Signed in ⇒ owned. A URL that already has a matching link returns that link with `alreadyExisted: true` |
 | `GET` | `/links` | optional | List. `?mineOnly=true` scopes to caller |
 | `GET` | `/links/:id` | optional | Single link |
-| `PATCH` | `/links/:id` | ✅ owner | Update slug, URL, title, active flag, expiry |
+| `PATCH` | `/links/:id` | ✅ owner | Update slug, URL, title, active flag, expiry. Anonymous callers get `401` explaining to create a new link instead |
 | `DELETE` | `/links/:id` | ✅ owner | Delete link and its visits |
 | `GET` | `/links/slug-available/:slug` | — | Live availability check |
 
@@ -197,7 +197,15 @@ User  ──1:N──▶  Link  ──1:N──▶  Visit
 |---|---|---|
 | `links` | `links_slug_key` **UNIQUE** | The redirect lookup; enforces slug uniqueness |
 | `links` | `links_ownerId_createdAt_idx` | "My links, newest first" |
-| `links` | `links_visitCount_idx` | Most-popular ranking |
+| `links` | `links_visitCount_idx` | Most-popular ranking (dashboard top-N) |
+| `links` | `links_createdAt_id_idx` | List sorted newest/oldest first — the default view |
+| `links` | `links_visitCount_id_idx` | List sorted by most visited |
+| `links` | `links_lastVisitedAt_id_idx` | List sorted by recently visited |
+
+> The three `*_id_idx` indexes lead **descending** and end in `id`. Both matter:
+> `buildOrderBy` emits `ORDER BY <col> DESC, id ASC`, and an index missing
+> either property is not used. See [`SCALING.md` §2.5](SCALING.md) for the
+> measurements.
 | `users` | `users_email_key` **UNIQUE** | Login |
 | `visits` | `visits_linkId_occurredAt_idx` | Per-link analytics windows |
 | `visits` | `visits_occurredAt_idx` | Global visits-over-time |

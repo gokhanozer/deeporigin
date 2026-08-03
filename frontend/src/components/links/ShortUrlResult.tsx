@@ -32,7 +32,21 @@ export function ShortUrlResult({ link, onDismiss }: ShortUrlResultProps): React.
   return (
     <Card className="animate-fade-in border-success/30 bg-success/5">
       <div className="flex items-start justify-between gap-3">
-        <p className="text-sm font-medium text-emerald-200">Success! Here&rsquo;s your short URL</p>
+        {/* Shortening a URL that already has a link returns the original rather
+            than a duplicate. Saying so avoids the impression that nothing
+            happened, or that a new link was made when it was not.
+
+            The wording differs by who is asking: a signed-in user is being
+            reminded of their own earlier link, while an anonymous visitor may
+            never have seen this one before and is being handed a shared,
+            unowned link. */}
+        <p className="text-sm font-medium text-emerald-200">
+          {!link.alreadyExisted
+            ? 'Success! Here’s your short URL'
+            : link.isOwner
+              ? 'You already shortened this — here’s your existing link'
+              : 'This URL already has a short link for anonymous users'}
+        </p>
         {onDismiss && (
           <button
             type="button"

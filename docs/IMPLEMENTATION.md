@@ -25,7 +25,7 @@ are stated along with the conditions under which the other option would win.
 13. [Testing](#13-testing)
 14. [Docker and deployment](#14-docker-and-deployment)
 15. [Requirement traceability](#15-requirement-traceability)
-16. [Known limitations and what I would do next](#16-known-limitations-and-what-i-would-do-next)
+16. [Known limitations and next steps](#16-known-limitations-and-next-steps)
 
 ---
 
@@ -295,6 +295,29 @@ another request can take the same slug, and the insert fails anyway. So:
 
 With a 7-character slug over a 62-character alphabet the keyspace is 62⁷ ≈ 3.5 × 10¹², so
 retries are vanishingly rare in practice — but correctness does not depend on that.
+
+**Shortening a URL that already has a link returns that link** instead of
+creating a second one. The response carries `alreadyExisted: true`.
+
+Which link counts as a match depends on who is asking:
+
+| Caller | Matches | Does not match |
+|---|---|---|
+| Signed in | Their own links | Anyone else's, and anonymous links |
+| Anonymous | Anonymous links | Any signed-in user's links |
+
+An anonymous caller is never given a link that belongs to a signed-in user.
+
+A new link is always created when:
+
+- the request asks for a custom slug, a title or an expiry;
+- the matching link is switched off or has expired.
+
+Matching is on the normalised URL, which lower-cases the host and drops a
+trailing slash. Query parameters are compared as written, so `?a=1&b=2` and
+`?b=2&a=1` are two different links.
+
+The lookup is indexed on `(ownerId, targetUrl)`.
 
 ### 5.2 Following a short link
 
@@ -732,7 +755,7 @@ SIGKILL in practice (verified). Durability is *windowed*, not guaranteed: a writ
 in the gap between snapshots can be lost. For an ops override that is acceptable,
 because losing one fails safe back to the configured default.
 
-### Two implementation details that turned out to matter
+### Two implementation details worth knowing
 
 **Counters are shared across replicas.** With `REDIS_URL` set, the throttler stores its
 counters in Redis instead of process memory. This is not optional once the API scales: each
@@ -804,7 +827,7 @@ Charts were built against an explicit visualization method rather than by eye.
 checking lightness band, chroma floor, colour-vision-deficiency separation, normal-vision
 separation and contrast against the dark surface (`#121826`).
 
-My first palette — indigo, sky, emerald, amber, rose, purple — **failed**: the
+An earlier palette — indigo, sky, emerald, amber, rose, purple — **failed** validation: the
 indigo↔sky pair scored ΔE 13.5 for normal vision, below the 15 floor, meaning even
 full-colour-vision readers would struggle to tell adjacent series apart. It was replaced with
 a set stepped for dark surfaces that passes every check (worst adjacent CVD ΔE 8.4 protan;
@@ -972,12 +995,12 @@ OpenTelemetry spans would be the next addition, and are not built.
 
 ## 13. Testing
 
-**229 unit tests across 17 suites, all passing** — and they need no database or
+**246 unit tests across 18 suites, all passing** — and they need no database or
 Redis, which is why the whole run takes a few seconds.
 
 ```
-Test Suites: 17 passed, 17 total
-Tests:       229 passed, 229 total
+Test Suites: 18 passed, 18 total
+Tests:       246 passed, 246 total
 ```
 
 | Suite | Covers |
@@ -991,6 +1014,8 @@ Tests:       229 passed, 229 total
 | `auth/{auth.service,auth.controller}.spec.ts` | Hashing, token issue, and per-route throttle tags |
 | `common/rate-limit/rate-limit-override.service.spec.ts` | Redis overrides, cache, fail-open |
 | `config/configuration.spec.ts` | Boolean env parsing — `SWAGGER_ENABLED=false` must not read as `true` |
+| `auth/guards/jwt-auth.guard.spec.ts` | What each guard does when no valid token is present |
+| `app.controller.spec.ts` | The service index — every path built from the configured prefix |
 | `app.e2e.spec.ts` | Bootstrap and the global pipeline |
 
 Coverage is concentrated where bugs would be expensive:
@@ -1110,9 +1135,9 @@ queries, `directUrl` straight to Postgres for migrations and seeding.
 
 ---
 
-## 16. Known limitations and what I would do next
+## 16. Known limitations and next steps
 
-Stated honestly — each is a deliberate scope decision, not an oversight.
+Each is a scope decision, with the change that would resolve it.
 
 **~~Rate-limit state is in-memory.~~ Resolved.** Counters now live in Redis when
 `REDIS_URL` is set, so the limit holds across replicas (verified: 10 allowed and the rest
@@ -1136,7 +1161,7 @@ seemed a worse trade than the duplication.
 
 **No end-to-end test suite.** The flows in [§13](#13-testing) were verified manually against
 the running stack. Playwright covering shorten → copy → redirect → dashboard would be the
-next addition, and is what I would write first if this were going into CI.
+next addition, and the first thing to write before this goes into CI.
 
 **No refresh tokens.** A 7-day JWT simply expires and the user signs in again. Short-lived
 access tokens plus rotating refresh tokens would be the production answer.

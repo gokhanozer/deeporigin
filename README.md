@@ -145,7 +145,7 @@ Every item from the task description, and where it lives:
 **Beyond the brief:** live slug-availability checking, link search and sorting, per-link
 analytics pages, All-links / My-links scoping, analytics windows from 24 hours to 90 days,
 link expiry, reserved-slug protection, SSRF and stored-XSS guards, privacy-preserving IP
-hashing, health probes, Swagger docs, Prometheus metrics, and 229 unit tests.
+hashing, health probes, Swagger docs, Prometheus metrics, and 246 unit tests.
 
 ---
 
@@ -196,7 +196,7 @@ npm run dev
 
 ```bash
 # Backend
-npm test              # 229 unit tests
+npm test              # 246 unit tests
 npm run test:cov      # with coverage
 npm run typecheck     # tsc --noEmit
 npm run prisma:studio # browse the database

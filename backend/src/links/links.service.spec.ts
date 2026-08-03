@@ -55,6 +55,7 @@ describe('LinksService', () => {
     link: {
       create: jest.Mock;
       findUnique: jest.Mock;
+      findFirst: jest.Mock;
       findMany: jest.Mock;
       count: jest.Mock;
       update: jest.Mock;
@@ -84,6 +85,8 @@ describe('LinksService', () => {
       link: {
         create: jest.fn(),
         findUnique: jest.fn(),
+        // Defaults to "no duplicate", so existing tests exercise the create path.
+        findFirst: jest.fn().mockResolvedValue(null),
         findMany: jest.fn(),
         count: jest.fn(),
         update: jest.fn(),
@@ -129,6 +132,106 @@ describe('LinksService', () => {
       prisma.link.create.mockResolvedValue(makeLink({ ownerId: null }));
       await service.create({ url: 'https://example.com' });
       expect(prisma.link.create.mock.calls[0][0].data.ownerId).toBeUndefined();
+    });
+
+    // ---- Re-shortening a URL that already has a link -----------------------
+    //
+    // Signed-in callers match their own links; anonymous callers match unowned
+    // ones. The assertions that matter most are the ones pinning that boundary,
+    // and the cases that must still create a second link.
+    describe('re-shortening', () => {
+      const existing = makeLink({ id: 'existing-1', ownerId: 'user-1' });
+
+      it('returns the existing link instead of creating a second one', async () => {
+        prisma.link.findFirst.mockResolvedValue(existing);
+
+        const result = await service.create({ url: 'https://example.com' }, 'user-1');
+
+        expect(prisma.link.create).not.toHaveBeenCalled();
+        expect(result.id).toBe('existing-1');
+        expect(result.alreadyExisted).toBe(true);
+      });
+
+      it('scopes the lookup to the caller and the normalised URL', async () => {
+        prisma.link.findFirst.mockResolvedValue(existing);
+
+        await service.create({ url: 'EXAMPLE.com/foo' }, 'user-1');
+
+        const where = prisma.link.findFirst.mock.calls[0][0].where;
+        expect(where.ownerId).toBe('user-1');
+        expect(where.targetUrl).toBe('https://example.com/foo');
+      });
+
+      it('ignores deactivated and expired links', async () => {
+        // Returning a dead link under "you already shortened this" would hand
+        // back a short URL that does not redirect.
+        prisma.link.findFirst.mockResolvedValue(existing);
+
+        await service.create({ url: 'https://example.com' }, 'user-1');
+
+        const where = prisma.link.findFirst.mock.calls[0][0].where;
+        expect(where.isActive).toBe(true);
+        expect(where.OR).toEqual([
+          { expiresAt: null },
+          { expiresAt: { gt: expect.any(Date) } },
+        ]);
+      });
+
+      it('does not flag a genuinely new link', async () => {
+        prisma.link.findFirst.mockResolvedValue(null);
+        prisma.link.create.mockResolvedValue(makeLink());
+
+        const result = await service.create({ url: 'https://example.com' }, 'user-1');
+
+        expect(result.alreadyExisted).toBeUndefined();
+      });
+
+      it('reuses an existing unowned link for an anonymous caller', async () => {
+        const anonymous = makeLink({ id: 'anon-1', ownerId: null });
+        prisma.link.findFirst.mockResolvedValue(anonymous);
+
+        const result = await service.create({ url: 'https://example.com' });
+
+        expect(prisma.link.create).not.toHaveBeenCalled();
+        expect(result.id).toBe('anon-1');
+        expect(result.alreadyExisted).toBe(true);
+      });
+
+      it('restricts an anonymous caller to unowned links', async () => {
+        // The critical assertion: `ownerId: null` is what stops an anonymous
+        // caller being handed a link that belongs to a signed-in user.
+        prisma.link.findFirst.mockResolvedValue(null);
+        prisma.link.create.mockResolvedValue(makeLink({ ownerId: null }));
+
+        await service.create({ url: 'https://example.com' });
+
+        expect(prisma.link.findFirst.mock.calls[0][0].where.ownerId).toBeNull();
+      });
+
+      it('does not hand a signed-in caller an anonymous link', async () => {
+        prisma.link.findFirst.mockResolvedValue(null);
+        prisma.link.create.mockResolvedValue(makeLink());
+
+        await service.create({ url: 'https://example.com' }, 'user-1');
+
+        expect(prisma.link.findFirst.mock.calls[0][0].where.ownerId).toBe('user-1');
+      });
+
+      it.each([
+        ['a custom slug', { slug: 'my-slug' }],
+        ['a title', { title: 'Campaign A' }],
+        ['an expiry', { expiresAt: new Date(Date.now() + 86_400_000).toISOString() }],
+      ])('still creates a new link when the request carries %s', async (_label, extra) => {
+        // Each of these asks for something the existing link does not have, so
+        // returning it would silently drop part of the request.
+        prisma.link.create.mockResolvedValue(makeLink());
+
+        await service.create({ url: 'https://example.com', ...extra }, 'user-1');
+
+
+        expect(prisma.link.findFirst).not.toHaveBeenCalled();
+        expect(prisma.link.create).toHaveBeenCalledTimes(1);
+      });
     });
 
     it('retries with a fresh slug when a generated one collides', async () => {

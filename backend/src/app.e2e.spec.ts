@@ -48,6 +48,9 @@ describe('API Integration (E2E)', () => {
     link: {
       create: jest.fn(),
       findUnique: jest.fn(),
+      // The re-shorten lookup, which runs on every create — including anonymous
+      // ones. Defaults to "no match" so these tests exercise the create path.
+      findFirst: jest.fn().mockResolvedValue(null),
       findMany: jest.fn(),
       count: jest.fn(),
       aggregate: jest.fn(),

@@ -210,4 +210,17 @@ export class LinkResponseDto {
 
   @ApiProperty()
   updatedAt!: Date;
+
+  /**
+   * `true` when `POST /links` returned a link that already existed rather than
+   * creating one.
+   *
+   * Only ever set for a signed-in caller re-shortening a URL they had already
+   * shortened themselves. Absent on every other response, including reads —
+   * it describes what a single request did, not a property of the link.
+   */
+  @ApiPropertyOptional({
+    description: 'Set when the request returned an existing link instead of creating one',
+  })
+  alreadyExisted?: boolean;
 }

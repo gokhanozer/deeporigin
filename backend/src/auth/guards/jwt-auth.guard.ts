@@ -9,9 +9,11 @@
  *                                   anonymous visitor can still shorten a URL
  *                                   (as in the mock-up) while a signed-in user
  *                                   automatically gets ownership of the link.
+ *  • {@link LinkOwnerAuthGuard}   — as `JwtAuthGuard`, but explains what to do
+ *                                   instead. Used on the link mutations.
  */
 
-import { ExecutionContext, Injectable } from '@nestjs/common';
+import { ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import type { JwtUser } from '../../common/decorators/current-user.decorator';
 
@@ -20,6 +22,39 @@ import type { JwtUser } from '../../common/decorators/current-user.decorator';
  */
 @Injectable()
 export class JwtAuthGuard extends AuthGuard('jwt') {}
+
+/**
+ * As {@link JwtAuthGuard}, but with a message aimed at the person reading it.
+ *
+ * Editing a link requires owning it, and ownership only exists for signed-in
+ * users — an anonymous link has `ownerId = null`, so nobody can claim it, not
+ * even whoever created it. A bare `401 Unauthorized` states the rule without
+ * saying what to do about it, so this names the alternative: shorten the URL
+ * again to get a link of your own.
+ *
+ * Scoped to the link mutations rather than applied to {@link JwtAuthGuard}
+ * itself, because the same guard protects `GET /auth/me`, where a message about
+ * editing URLs would be nonsense.
+ */
+@Injectable()
+export class LinkOwnerAuthGuard extends AuthGuard('jwt') {
+  /**
+   * Replaces Passport's generic rejection with an actionable one.
+   *
+   * @param error Authentication error, if Passport raised one.
+   * @param user  The principal Passport resolved, or `false` when absent.
+   * @returns The authenticated user.
+   * @throws {UnauthorizedException} When no valid token was presented.
+   */
+  handleRequest<TUser = JwtUser>(error: unknown, user: unknown): TUser {
+    if (error || !user) {
+      throw new UnauthorizedException(
+        "Anonymous users can't edit existing URLs — create a new one instead.",
+      );
+    }
+    return user as TUser;
+  }
+}
 
 /**
  * Populates `request.user` when a valid token is present, and does nothing

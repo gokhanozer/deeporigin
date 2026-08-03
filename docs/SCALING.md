@@ -288,6 +288,63 @@ visits per window it is an out-of-memory crash.
 
 ---
 
+### 2.4 `GET /links` counts the whole table on every request
+
+Every list request runs two queries: the page of rows, and a `COUNT(*)` for the
+total. The page fetch is indexed and fast. The count is a sequential scan that no
+index removes.
+
+Measured on 5M rows, page 1:
+
+| Rows | Page fetch | `COUNT(*)` |
+|---|---|---|
+| 500,000 | 0.05 ms | 17 ms |
+| 5,000,000 | 0.6 ms | 191 ms |
+
+It grows at roughly **38 ms per million rows**, and becomes the dominant cost of
+the page well before anything else does.
+
+**Trigger:** ~1M links.
+
+**Change:** either return an estimated total from `pg_class.reltuples` when no
+search or owner filter is applied, or drop exact totals and return `hasNextPage`
+instead of `totalPages`. Both change the API response, so neither is done yet.
+
+**Effort:** small. The work is in the frontend and the API shape, not the query.
+
+Two things that are *not* the bottleneck, both measured:
+
+- **Deep pagination.** With the sort indexes in place, page 10,000 of 5M rows
+  costs 41 ms and page 100,000 costs 452 ms. The count above dominates first.
+- **Page size.** `LIMIT 10 / 50 / 100` measured 0.021 / 0.026 / 0.033 ms.
+
+---
+
+### 2.5 List sorts had no usable index ✅ DONE
+
+The list sorts by `<column> DESC, id ASC`. No index matched that, so sorting the
+public list scanned and sorted the whole table to return ten rows. Only "my
+links" was covered, by `links_ownerId_createdAt_idx`.
+
+Measured on 5M rows, page 1:
+
+| Sort option | Before | After |
+|---|---|---|
+| Newest first *(default)* | 43 ms | **0.6 ms** |
+| Oldest first | 43 ms | 0.19 ms |
+| Most visited | 25 ms | sub-ms |
+| Recently visited | **573 ms** | sub-ms |
+| My links | 0.24 ms | unchanged |
+
+Three indexes were added in migration `20260803190734_add_list_sort_indexes`.
+Each ends in `id` and leads `DESC`, matching the query exactly — an index
+missing either property is not used.
+
+`links_visitCount_idx` is now covered by `links_visitCount_id_idx` and could be
+dropped.
+
+---
+
 ## Tier 3 — infrastructure
 
 ### 3.1 Connection pool exhaustion ✅ DONE
