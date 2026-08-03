@@ -17,6 +17,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
+import { ApiError } from '../lib/api-client';
 import { getCurrentUser, login as loginRequest, register as registerRequest } from '../lib/api/auth';
 import { clearStoredToken, getStoredToken, setStoredToken } from '../lib/token-storage';
 import type { User } from '../lib/types';
@@ -65,12 +66,24 @@ export function AuthProvider({ children }: { children: ReactNode }): React.JSX.E
       .then((restored) => {
         if (!cancelled) setUser(restored);
       })
-      .catch(() => {
-        // The token is invalid or expired — discard it.
-        if (!cancelled) {
+      .catch((error: unknown) => {
+        if (cancelled) return;
+
+        // ONLY a 401 means the token is genuinely bad. Discarding it on any
+        // error signs the user out for reasons that have nothing to do with
+        // their credentials — a rate limit (429), a network blip, or the API
+        // briefly restarting (502/503) — and because clearing the token forces
+        // a fresh login, the recovery costs another auth request.
+        if (error instanceof ApiError && error.isUnauthorized) {
           clearStoredToken();
           setUser(null);
+          return;
         }
+
+        // Anything else is transient. Keep the token so the next navigation or
+        // reload can restore the session, and leave `user` as null so the UI
+        // renders its signed-out state rather than a half-loaded one.
+        console.warn('Could not restore session; keeping the stored token.', error);
       })
       .finally(() => {
         if (!cancelled) setInitializing(false);

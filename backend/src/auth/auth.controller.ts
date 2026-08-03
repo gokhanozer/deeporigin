@@ -1,9 +1,23 @@
 /**
  * Authentication endpoints.
  *
- * All routes here carry the strictest rate limit in the application: auth is
- * the prime target for credential-stuffing, and a slow brute-force is far more
- * damaging than a slow link-shortening request.
+ * Rate limiting is applied **per route**, not to the controller, and the
+ * distinction matters:
+ *
+ *  • `register` and `login` each carry the strictest limit in the application
+ *    (`@ThrottleAuth()`). Every request is a guess at a secret, so being too
+ *    permissive risks account takeover — and bcrypt makes each attempt costly
+ *    server-side, so unlimited attempts are also a CPU-exhaustion vector.
+ *
+ *  • `me` deliberately does NOT. It is an authenticated read that proves an
+ *    existing token, not an attempt to obtain one, so it belongs in the default
+ *    bucket alongside other reads.
+ *
+ * Applying `@ThrottleAuth()` at controller level — as this originally did —
+ * swept `me` into the brute-force bucket. Because the frontend calls it on every
+ * page load to restore the session, a user refreshing five or six times in a
+ * minute exhausted the budget and was signed out. See the matching fix in
+ * `frontend/src/providers/AuthProvider.tsx`.
  */
 
 import { Body, Controller, Get, HttpCode, HttpStatus, Post, UseGuards } from '@nestjs/common';
@@ -16,8 +30,6 @@ import { JwtAuthGuard } from './guards/jwt-auth.guard';
 
 @ApiTags('auth')
 @Controller('auth')
-// Applies the strict auth rate limit to every route in this controller.
-@ThrottleAuth()
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
@@ -28,6 +40,7 @@ export class AuthController {
    * @returns Access token and the created user.
    */
   @Post('register')
+  @ThrottleAuth()
   @ApiOperation({ summary: 'Create an account' })
   @ApiResponse({ status: 201, type: AuthResponseDto })
   @ApiResponse({ status: 409, description: 'Email already registered' })
@@ -45,6 +58,7 @@ export class AuthController {
    * @returns Access token and the user.
    */
   @Post('login')
+  @ThrottleAuth()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Log in and receive an access token' })
   @ApiResponse({ status: 200, type: AuthResponseDto })
