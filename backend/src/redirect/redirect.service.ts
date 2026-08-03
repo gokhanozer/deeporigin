@@ -12,6 +12,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { normalizeSlug } from '../common/utils/slug.util';
 import { isLinkResolvable } from '../links/links.mapper';
 import { VisitsService, type VisitMetadata } from '../visits/visits.service';
+import { MetricsService } from '../metrics/metrics.service';
 
 /** Result of successfully resolving a slug. */
 export interface ResolvedLink {
@@ -28,6 +29,7 @@ export class RedirectService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly visits: VisitsService,
+    private readonly metrics: MetricsService,
   ) {}
 
   /**
@@ -49,6 +51,9 @@ export class RedirectService {
    *         which the frontend turns into the required 404 page.
    */
   async resolve(rawSlug: string, metadata: VisitMetadata = {}): Promise<ResolvedLink> {
+    // Timed here rather than in the HTTP interceptor so the measurement covers
+    // the resolution itself, independent of transport overhead.
+    const startedAt = process.hrtime.bigint();
     const slug = normalizeSlug(rawSlug);
 
     const link = await this.prisma.link.findUnique({
@@ -59,10 +64,15 @@ export class RedirectService {
     // Unknown, disabled and expired links are all reported identically, so the
     // 404 page never has to explain *why* a link is unavailable.
     if (!link || !isLinkResolvable(link)) {
+      // Deliberately one `not_found` label rather than three. Splitting by
+      // reason would leak why a link is unavailable into the metric, and the
+      // operator question is "how many misses?", not "which kind?".
+      this.metrics.observeRedirect('not_found', startedAt);
       throw new NotFoundException('This short link does not exist');
     }
 
     void this.visits.recordVisit(link.id, metadata);
+    this.metrics.observeRedirect('hit', startedAt);
 
     return { id: link.id, targetUrl: link.targetUrl };
   }

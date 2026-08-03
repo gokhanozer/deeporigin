@@ -15,11 +15,32 @@
  * "most endpoints are generous, these few are strict".
  */
 
+import { applyDecorators, SetMetadata } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { configuration } from '../../config/configuration';
+import type { RateLimitBucket } from '../rate-limit/rate-limit-override.service';
 
 /** Rate-limit settings resolved once, at module load. */
 const { rateLimit } = configuration();
+
+/**
+ * Metadata key carrying the bucket name a route belongs to.
+ *
+ * The decorator's numeric values are frozen into class metadata at module load
+ * and cannot change afterwards. Tagging the route with a *name* is what lets
+ * {@link ThrottlerProxyGuard} look up a runtime override for it — the name is
+ * stable, the numbers behind it are not.
+ */
+export const RATE_LIMIT_BUCKET = 'rate-limit-bucket';
+
+/**
+ * Tags a route or controller with a named rate-limit bucket.
+ *
+ * @param bucket Bucket name that overrides can target.
+ * @returns A decorator attaching the metadata.
+ */
+export const RateLimitBucketTag = (bucket: RateLimitBucket) =>
+  SetMetadata(RATE_LIMIT_BUCKET, bucket);
 
 /**
  * Strict limit for authentication endpoints.
@@ -30,7 +51,10 @@ const { rateLimit } = configuration();
  * @returns A method/class decorator applying the auth limit.
  */
 export const ThrottleAuth = () =>
-  Throttle({ default: { limit: rateLimit.authLimit, ttl: rateLimit.windowMs } });
+  applyDecorators(
+    Throttle({ default: { limit: rateLimit.authLimit, ttl: rateLimit.windowMs } }),
+    RateLimitBucketTag('auth'),
+  );
 
 /**
  * Tighter limit for link creation.
@@ -41,7 +65,10 @@ export const ThrottleAuth = () =>
  * @returns A method/class decorator applying the creation limit.
  */
 export const ThrottleCreate = () =>
-  Throttle({ default: { limit: rateLimit.createLimit, ttl: rateLimit.windowMs } });
+  applyDecorators(
+    Throttle({ default: { limit: rateLimit.createLimit, ttl: rateLimit.windowMs } }),
+    RateLimitBucketTag('create'),
+  );
 
 /** The resolved limits, re-exported for logging and documentation. */
 export const RATE_LIMITS = rateLimit;

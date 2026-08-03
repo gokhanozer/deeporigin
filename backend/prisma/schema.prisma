@@ -21,11 +21,47 @@
 
 generator client {
   provider = "prisma-client-js"
+
+  /// `metrics` exposes connection-pool and query counters in Prometheus text
+  /// format via `prisma.$metrics.prometheus()`. This is how pool saturation —
+  /// the exact failure PgBouncer exists to prevent — becomes observable without
+  /// hand-instrumenting the data layer.
+  ///
+  /// ⚠️ Prisma marks this preview feature DEPRECATED; it will be removed in a
+  /// future release. That is survivable rather than blocking: `MetricsService`
+  /// wraps the call in a try/catch and serves the application's own metrics
+  /// regardless, so its removal degrades the exposition instead of breaking the
+  /// scrape endpoint. When it goes, the replacement is either Prisma's
+  /// OpenTelemetry tracing or reading pool stats from PgBouncer's admin console
+  /// (`SHOW POOLS`), which is arguably the better source anyway now that
+  /// PgBouncer owns the real connections.
+  previewFeatures = ["metrics"]
 }
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
+
+  /// Runtime queries. In the containerised stack this points at PgBouncer, which
+  /// multiplexes many client connections onto a few real Postgres ones. Without
+  /// pooling, each backend replica opens its own pool (cpus*2+1 ≈ 25), so four
+  /// replicas would exhaust Postgres's default 100-connection budget.
+  ///
+  /// The URL must carry `?pgbouncer=true`: in transaction-pooling mode every
+  /// transaction may land on a different backend connection, so Prisma has to
+  /// stop reusing named prepared statements.
+  url = env("DATABASE_URL")
+
+  /// Migrations and introspection, connecting straight to Postgres.
+  ///
+  /// This split is REQUIRED, not an optimisation. `prisma migrate deploy` takes
+  /// a session-level advisory lock to prevent concurrent migrations — and
+  /// transaction pooling is precisely what breaks it, because the LOCK and the
+  /// UNLOCK can be issued on two different backend connections. Routed through
+  /// PgBouncer, migrations hang or fail.
+  ///
+  /// Falls back to DATABASE_URL when unset, so local development against a
+  /// plain Postgres needs no extra configuration.
+  directUrl = env("DIRECT_DATABASE_URL")
 }
 
 /// A registered account. Optional: the shortener works without signing up.

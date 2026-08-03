@@ -12,6 +12,7 @@ import { Test, type TestingModule } from '@nestjs/testing';
 import { VisitsService } from './visits.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { hashIp } from '../common/utils/request.util';
+import { metricsStubProvider } from '../metrics/metrics.testing';
 
 const CHROME_MAC =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ' +
@@ -53,6 +54,7 @@ describe('VisitsService', () => {
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
+        metricsStubProvider(),
         VisitsService,
         { provide: PrismaService, useValue: prisma },
         { provide: ConfigService, useValue: configStub },

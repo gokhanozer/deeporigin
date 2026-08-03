@@ -14,6 +14,7 @@ import { BadRequestException, ConflictException, ForbiddenException, NotFoundExc
 import { Prisma, type Link } from '@prisma/client';
 import { LinksService } from './links.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { metricsStubProvider } from '../metrics/metrics.testing';
 
 /** Builds a link row for use as a mocked query result. */
 function makeLink(overrides: Partial<Link> = {}): Link {
@@ -94,6 +95,7 @@ describe('LinksService', () => {
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
+        metricsStubProvider(),
         LinksService,
         { provide: PrismaService, useValue: prisma },
         { provide: ConfigService, useValue: configStub },

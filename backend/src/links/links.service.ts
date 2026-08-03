@@ -15,6 +15,7 @@ import { ConfigService } from '@nestjs/config';
 import { Prisma, type Link } from '@prisma/client';
 import type { AppConfig } from '../config/configuration';
 import { PrismaService } from '../prisma/prisma.service';
+import { MetricsService } from '../metrics/metrics.service';
 import { generateUsableSlug, normalizeSlug, validateSlug } from '../common/utils/slug.util';
 import { validateUrl } from '../common/utils/url.util';
 import { buildPaginatedResult, toSkipTake, type PaginatedResult } from '../common/utils/pagination.util';
@@ -36,6 +37,7 @@ export class LinksService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService<AppConfig, true>,
+    private readonly metrics: MetricsService,
   ) {}
 
   /**
@@ -72,6 +74,7 @@ export class LinksService {
         const link = await this.prisma.link.create({
           data: { slug, targetUrl, title: dto.title || null, isCustomSlug: true, ownerId, expiresAt },
         });
+        this.metrics.linkCreatedTotal.inc({ slug_type: 'custom' });
         return this.present(link, ownerId);
       } catch (error) {
         if (this.isSlugCollision(error)) {
@@ -88,9 +91,13 @@ export class LinksService {
         const link = await this.prisma.link.create({
           data: { slug, targetUrl, title: dto.title || null, isCustomSlug: false, ownerId, expiresAt },
         });
+        this.metrics.linkCreatedTotal.inc({ slug_type: 'generated' });
         return this.present(link, ownerId);
       } catch (error) {
         if (this.isSlugCollision(error)) {
+          // Rising steadily means the keyspace is filling — the signal to
+          // raise SLUG_LENGTH, and otherwise invisible until creates fail.
+          this.metrics.slugCollisionTotal.inc();
           this.logger.warn(`Slug collision on "${slug}" (attempt ${attempt})`);
           continue;
         }

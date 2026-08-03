@@ -7,6 +7,7 @@ import { NotFoundException } from '@nestjs/common';
 import { RedirectService } from './redirect.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { VisitsService } from '../visits/visits.service';
+import { metricsStubProvider } from '../metrics/metrics.testing';
 
 describe('RedirectService', () => {
   let service: RedirectService;
@@ -40,6 +41,7 @@ describe('RedirectService', () => {
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
+        metricsStubProvider(),
         RedirectService,
         { provide: PrismaService, useValue: prisma },
         { provide: VisitsService, useValue: visitsService },

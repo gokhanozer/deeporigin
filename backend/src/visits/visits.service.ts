@@ -10,6 +10,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { AppConfig } from '../config/configuration';
 import { PrismaService } from '../prisma/prisma.service';
+import { MetricsService } from '../metrics/metrics.service';
 import { hashIp } from '../common/utils/request.util';
 import { parseUserAgent } from '../common/utils/user-agent.util';
 
@@ -30,6 +31,7 @@ export class VisitsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService<AppConfig, true>,
+    private readonly metrics: MetricsService,
   ) {}
 
   /**
@@ -76,6 +78,9 @@ export class VisitsService {
         }),
       ]);
     } catch (error) {
+      // This path is fire-and-forget, so without the counter a persistent
+      // write failure would be entirely invisible on the redirect path.
+      this.metrics.visitRecordFailedTotal.inc();
       this.logger.error(
         `Failed to record visit for link ${linkId}: ${(error as Error).message}`,
       );
