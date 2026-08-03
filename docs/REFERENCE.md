@@ -78,6 +78,12 @@ Base path `/api/v1`. Swagger at `/api/v1/docs`, controlled by `SWAGGER_ENABLED`
 — on by default outside production, and switched on explicitly in the compose
 stack so the demo serves it.
 
+### Meta
+
+| Method | Path | Auth | Description |
+|---|---|:--:|---|
+| `GET` | `/` | — | Service index — name, version, and the entry point for each area. Paths are derived from `API_PREFIX`, and `docs` is `null` when Swagger is disabled |
+
 ### Auth
 
 | Method | Path | Auth | Description |
