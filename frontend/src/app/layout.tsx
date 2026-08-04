@@ -14,9 +14,9 @@ import { Header } from '../components/layout/Header';
 
 export const metadata: Metadata = {
   title: {
-    default: 'Shortly — URL Shortener',
+    default: 'Shortener — shorten, share, measure',
     // Pages set only their own name; the suffix is appended automatically.
-    template: '%s · Shortly',
+    template: '%s · Shortener',
   },
   description:
     'Shorten long URLs into clean, shareable short links, then track how popular they are.',
@@ -59,7 +59,7 @@ export default function RootLayout({
 
             <footer className="mt-16 border-t border-border/70 py-8">
               <div className="mx-auto max-w-6xl px-4 text-center text-xs text-subtle sm:px-6">
-                Shortly — built with Next.js, NestJS, Prisma and PostgreSQL.
+                Shortener — built with Next.js, NestJS, Prisma and PostgreSQL.
               </div>
             </footer>
           </ToastProvider>

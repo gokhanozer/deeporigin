@@ -166,16 +166,33 @@ describe('AnalyticsService', () => {
       ).rejects.toBeInstanceOf(NotFoundException);
     });
 
-    it('throws ForbiddenException if viewer is not the owner of a private link', async () => {
-      const link = {
-        id: 'link-1',
-        ownerId: 'user-owner',
-      };
-      prisma.link.findUnique.mockResolvedValue(link);
+    /** A link owned by someone other than the viewer. */
+    const ownedByAnother = {
+      id: 'link-1',
+      slug: 'owned',
+      targetUrl: 'https://example.com',
+      ownerId: 'user-owner',
+      visitCount: 0,
+      isActive: true,
+      createdAt: new Date(),
+    };
+
+    it('refuses another signed-in user', async () => {
+      // The link stays listed publicly with its visit count, but its
+      // breakdowns are private to its owner.
+      prisma.link.findUnique.mockResolvedValue(ownedByAnother);
 
       await expect(
-        service.getLinkAnalytics('link-1', 30, 'user-attacker'),
+        service.getLinkAnalytics('link-1', 30, 'user-other'),
       ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('refuses a signed-out visitor on an owned link', async () => {
+      prisma.link.findUnique.mockResolvedValue(ownedByAnother);
+
+      await expect(service.getLinkAnalytics('link-1', 30)).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
     });
 
     it('allows viewing analytics for anonymous (public) links', async () => {

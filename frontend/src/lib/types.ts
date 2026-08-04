@@ -27,6 +27,15 @@ export interface Link {
   expiresAt: string | null;
   /** `true` when the signed-in user may edit or delete this link. */
   isOwner: boolean;
+  /** `true` when the link was created without an account. */
+  isAnonymous: boolean;
+  /**
+   * `true` when the viewer may open this link's analytics page.
+   *
+   * True for your own links and for anonymous ones. Reported by the API so the
+   * UI never has to re-derive the rule the API enforces.
+   */
+  canViewAnalytics: boolean;
   createdAt: string;
   updatedAt: string;
   /**

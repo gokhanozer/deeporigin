@@ -22,7 +22,7 @@ import type { AppConfig } from '../config/configuration';
 import { PrismaService } from '../prisma/prisma.service';
 import { buildDailySeries, countByValue, daysAgo } from '../common/utils/date.util';
 import { DEFAULT_ANALYTICS_DAYS } from '../common/constants/app.constants';
-import { toLinkDto, toLinkDtoList } from '../links/links.mapper';
+import { toLinkDto, toLinkDtoList, canViewLinkAnalytics } from '../links/links.mapper';
 import type {
   AnalyticsOverviewDto,
   BreakdownItemDto,
@@ -142,8 +142,12 @@ export class AnalyticsService {
    * @param days     Look-back window in days.
    * @param viewerId Requesting user's ID, if authenticated.
    * @returns The per-link analytics payload.
+   * Readable for the caller's own links and for anonymous ones. Another
+   * user's link is still listed publicly with its visit count, but its
+   * breakdowns stay private.
+   *
    * @throws {NotFoundException}  When the link does not exist.
-   * @throws {ForbiddenException} When the link is owned by somebody else.
+   * @throws {ForbiddenException} When the link belongs to another user.
    */
   async getLinkAnalytics(
     linkId: string,
@@ -153,9 +157,7 @@ export class AnalyticsService {
     const link = await this.prisma.link.findUnique({ where: { id: linkId } });
     if (!link) throw new NotFoundException('Link not found');
 
-    // Anonymous links are public (they appear in the public list, so their
-    // stats are not a secret). An owned link is private to its owner.
-    if (link.ownerId && link.ownerId !== viewerId) {
+    if (!canViewLinkAnalytics(link, viewerId)) {
       throw new ForbiddenException('You do not have permission to view these analytics');
     }
 

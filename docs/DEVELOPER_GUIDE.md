@@ -89,7 +89,7 @@ frontend/src/
 
 ```bash
 cd backend
-npm test                 # 253 backend tests
+npm test                 # whole backend suite
 npm run test:cov         # with coverage
 npm test -- slug.util    # one file
 npm run typecheck        # tsc --noEmit
@@ -97,9 +97,10 @@ npm run typecheck        # tsc --noEmit
 
 From the repo root, `npm test` and `npm run typecheck` cover both apps.
 
-**What is tested:** 18 backend suites — the pure utilities (slug, url, date,
-pagination, user-agent), the services (links, redirect, visits, analytics, auth,
-rate-limit overrides), DTO transformation, and one e2e spec.
+**What is tested:** the pure utilities (slug, url, date, pagination,
+user-agent), the services (links, redirect, visits, analytics, auth, rate-limit
+overrides), DTO and query-string coercion, the auth guards, configuration
+parsing, and one e2e spec.
 
 **What is not:** the frontend has **zero tests**. That is the largest known gap.
 Start with `useClipboard` (it has a real `execCommand` fallback), `lib/validators.ts`

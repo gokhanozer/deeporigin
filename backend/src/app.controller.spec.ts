@@ -41,7 +41,7 @@ describe('AppController', () => {
   it('names the service and its version', async () => {
     const index = (await buildController('api/v1', true)).index();
 
-    expect(index.name).toBe('Shortly URL Shortener API');
+    expect(index.name).toBe('Shortener API');
     expect(index.version).toBe('1.0');
   });
 

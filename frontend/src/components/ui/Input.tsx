@@ -38,6 +38,10 @@ export function Input({
   prefix,
   suffix,
   className = '',
+  // Read rather than only forwarded: the visible border and label live on
+  // wrapper elements, so the browser's own disabled styling never reaches them
+  // and a disabled field would otherwise look identical to an editable one.
+  disabled,
   ...rest
 }: InputProps): React.JSX.Element {
   // `useId` produces a stable identifier across server and client renders,
@@ -52,14 +56,23 @@ export function Input({
   return (
     <div className="w-full">
       {label && (
-        <label htmlFor={inputId} className="mb-1.5 block text-sm font-medium text-muted">
+        <label
+          htmlFor={inputId}
+          className={`mb-1.5 block text-sm font-medium ${disabled ? 'text-subtle' : 'text-muted'}`}
+        >
           {label}
         </label>
       )}
 
       <div
-        className={`flex items-center rounded-lg border bg-surface transition-colors focus-within:border-brand ${
-          hasError ? 'border-danger/60' : 'border-border hover:border-border-strong'
+        className={`flex items-center rounded-lg border transition-colors focus-within:border-brand ${
+          disabled
+            ? // Three signals rather than opacity alone, which reads as "loading":
+              // no hover affordance, a flatter surface, and a dashed edge.
+              'cursor-not-allowed border-dashed border-border/60 bg-surface-raised/30'
+            : hasError
+              ? 'border-danger/60 bg-surface'
+              : 'border-border bg-surface hover:border-border-strong'
         }`}
       >
         {prefix && (
@@ -74,7 +87,8 @@ export function Input({
           aria-invalid={hasError || undefined}
           // Points assistive tech at whichever message is currently shown.
           aria-describedby={hasError ? errorId : hint ? hintId : undefined}
-          className={`w-full bg-transparent px-3 py-2.5 text-sm text-content placeholder:text-subtle focus:outline-none ${className}`}
+          disabled={disabled}
+          className={`w-full bg-transparent px-3 py-2.5 text-sm text-content placeholder:text-subtle focus:outline-none disabled:cursor-not-allowed disabled:text-subtle disabled:placeholder:text-subtle/60 ${className}`}
           {...rest}
         />
 

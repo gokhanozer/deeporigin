@@ -205,6 +205,25 @@ export class LinkResponseDto {
   @ApiProperty()
   isOwner!: boolean;
 
+  /**
+   * `true` when the link was created without an account.
+   *
+   * Distinct from `!isOwner`, which is also true for a link belonging to
+   * another user. No identifying detail about that user is ever exposed.
+   */
+  @ApiProperty()
+  isAnonymous!: boolean;
+
+  /**
+   * `true` when the caller may open this link's analytics.
+   *
+   * True for the caller's own links and for anonymous ones. Another user's
+   * link is listed but not inspectable.
+   */
+  @ApiProperty()
+  canViewAnalytics!: boolean;
+
+
   @ApiProperty()
   createdAt!: Date;
 

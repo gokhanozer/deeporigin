@@ -52,3 +52,22 @@ export const SCOPE_OPTIONS: ReadonlyArray<{ value: LinkScope; label: string }> =
   { value: 'all', label: 'All links' },
   { value: 'mine', label: 'My links' },
 ];
+
+/** Which set of links the dashboard table is showing. */
+export type LinkTableView = 'popular' | 'all' | 'mine';
+
+/**
+ * Views offered by the dashboard's link table.
+ *
+ * `popular` is a fixed top-N ranking straight from the analytics query, so it
+ * takes neither search nor sort — filtering or reordering a top ten makes it
+ * something else. The two list views take both.
+ *
+ * `mine` is only offered to signed-in users: an anonymous visitor has no
+ * "yours", and the API rejects the owner-scoped query without a token.
+ */
+export const LINK_TABLE_VIEWS: ReadonlyArray<{ value: LinkTableView; label: string }> = [
+  { value: 'popular', label: 'Most popular' },
+  { value: 'all', label: 'All links' },
+  { value: 'mine', label: 'Your links' },
+];

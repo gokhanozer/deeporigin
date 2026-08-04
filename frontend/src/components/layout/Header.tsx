@@ -31,7 +31,7 @@ export function Header(): React.JSX.Element {
         {/* Brand */}
         <Link href="/" className="flex items-center gap-2 text-content">
           <LinkGlyph />
-          <span className="text-sm font-semibold tracking-tight">Shortly</span>
+          <span className="text-sm font-semibold tracking-tight">Shortener</span>
         </Link>
 
         {/* Primary navigation */}

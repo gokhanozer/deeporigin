@@ -3,7 +3,7 @@
   "title": "shortener \u2014 service overview",
   "description": "Operational overview of the URL shortener. Start here: the open rows answer 'is anything wrong, and roughly where?'. Collapsed rows hold the detail for when you already know where to look. Product analytics (per-link popularity) live in the app at /dashboard \u2014 per-link labels would blow up Prometheus cardinality.",
   "tags": [
-    "shortly",
+    "shortener",
     "backend"
   ],
   "timezone": "browser",
