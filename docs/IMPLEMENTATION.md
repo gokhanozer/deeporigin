@@ -1226,6 +1226,12 @@ access tokens plus rotating refresh tokens would be the production answer.
 IPs and under-count several people behind one NAT. A first-party cookie would be more
 accurate but carries consent obligations that a click-counter should not incur lightly.
 
+**Link expiry has no UI.** The column, the DTO field, the redirect check and the expired
+badge are all in place — an expired link stops resolving and is excluded from re-shorten
+matching — but `expiresAt` can only be set through the API. The brief did not ask for
+expiry, and a date picker with timezone handling is a feature in its own right. The
+groundwork is there for whoever wants it.
+
 **No custom domains, QR codes, bulk import, or link folders.** All natural next features,
 none of them in the brief.
 
