@@ -46,9 +46,12 @@ export function toLinkDto(
     expiresAt: link.expiresAt,
     // `ownerId` itself is never exposed — only whether it matches the viewer.
     isOwner: Boolean(viewerId && link.ownerId === viewerId),
-    // Reported rather than re-derived by the client: `isOwner: false` covers
-    // both "someone else's link" (private) and "an anonymous link" (public),
-    // which need opposite treatment in the UI.
+    // Distinguishes "created without an account" from "belongs to someone
+    // else". Both are `isOwner: false`, but they mean different things to a
+    // reader, and neither reveals who the other user is.
+    isAnonymous: link.ownerId === null,
+    // Reported rather than re-derived by the client, so the rule the API
+    // enforces and the affordance the UI offers cannot drift apart.
     canViewAnalytics: canViewLinkAnalytics(link, viewerId),
     createdAt: link.createdAt,
     updatedAt: link.updatedAt,
@@ -93,14 +96,14 @@ export function isLinkResolvable(
 /**
  * Determines whether a viewer may read a link's analytics.
  *
- * Two cases qualify, and the second is easy to miss: an **anonymous** link has
- * no owner to keep it private, and it is already listed publicly with its visit
- * count, so its breakdowns are not a secret either. An **owned** link is
- * private to its owner.
+ * Two cases qualify: the viewer **owns** the link, or the link is
+ * **anonymous** and so belongs to nobody. Another user's link stays private —
+ * it is still listed, with its visit count, because the brief asks for a list
+ * of every URL in the database, but its breakdowns are not opened up.
  *
  * Shared by the analytics endpoint, which enforces it, and the link mapper,
- * which reports it — so the UI never offers a link to a page that would answer
- * `403`, and never hides one that would have worked.
+ * which reports it — so the UI never offers a route that would answer `403`,
+ * and never withholds one that would have worked.
  *
  * @param link     The link to test.
  * @param viewerId Requesting user's ID, if authenticated.

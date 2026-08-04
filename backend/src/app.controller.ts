@@ -55,7 +55,7 @@ export class AppController {
     const swaggerEnabled = this.config.get('swaggerEnabled', { infer: true });
 
     return {
-      name: 'Shortly URL Shortener API',
+      name: 'Shortener API',
       version: '1.0',
       docs: swaggerEnabled ? `${prefix}/docs` : null,
       health: `${prefix}/health/ready`,

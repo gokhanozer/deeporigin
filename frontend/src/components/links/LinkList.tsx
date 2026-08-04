@@ -24,8 +24,9 @@ import { deleteLink, listLinks } from '../../lib/api/links';
 import { formatNumber, pluralize } from '../../lib/format';
 import { useToast } from '../../providers/ToastProvider';
 import { useAuth } from '../../providers/AuthProvider';
-import type { Link, LinkSortField } from '../../lib/types';
+import type { Link } from '../../lib/types';
 import { SCOPE_OPTIONS, type LinkScope } from '../../lib/analytics-periods';
+import { LINK_SORT_OPTIONS, resolveLinkSort } from '../../lib/link-sort';
 import { SegmentedToggle } from '../ui/SegmentedToggle';
 
 export interface LinkListProps {
@@ -59,19 +60,6 @@ export interface LinkListProps {
   /** Bumping this value forces a refetch — used after creating a link. */
   refreshToken?: number;
 }
-
-/** Sort options offered in the UI, mapped to API parameters. */
-const SORT_OPTIONS: ReadonlyArray<{
-  value: string;
-  label: string;
-  sortBy: LinkSortField;
-  sortOrder: 'asc' | 'desc';
-}> = [
-  { value: 'newest', label: 'Newest first', sortBy: 'createdAt', sortOrder: 'desc' },
-  { value: 'oldest', label: 'Oldest first', sortBy: 'createdAt', sortOrder: 'asc' },
-  { value: 'popular', label: 'Most visited', sortBy: 'visitCount', sortOrder: 'desc' },
-  { value: 'recent', label: 'Recently visited', sortBy: 'lastVisitedAt', sortOrder: 'desc' },
-];
 
 /** Rows requested per page. */
 const PAGE_SIZE = 10;
@@ -137,7 +125,7 @@ export function LinkList({
   }, [isAuthenticated, scope, defaultScope]);
 
   const debouncedSearch = useDebouncedValue(search, 350);
-  const sort = SORT_OPTIONS.find((option) => option.value === sortValue) ?? SORT_OPTIONS[0];
+  const sort = resolveLinkSort(sortValue);
 
   const fetchLinks = useCallback(
     () =>
@@ -252,7 +240,7 @@ export function LinkList({
               aria-label="Sort links"
               className="h-[42px] shrink-0 rounded-lg border border-border bg-surface px-3 text-sm text-content transition-colors hover:border-border-strong focus:border-brand focus:outline-none"
             >
-              {SORT_OPTIONS.map((option) => (
+              {LINK_SORT_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
                 </option>

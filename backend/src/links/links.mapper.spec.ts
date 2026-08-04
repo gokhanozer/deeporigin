@@ -98,10 +98,36 @@ describe('isLinkResolvable', () => {
     expect(isLinkResolvable({ isActive: true, expiresAt: now }, now)).toBe(false);
   });
 
+
+
+  describe('ownership flags', () => {
+    it('marks a link created without an account as anonymous', () => {
+      const dto = toLinkDto(makeLink({ ownerId: null }), 'https://short.ly');
+      expect(dto.isAnonymous).toBe(true);
+      expect(dto.isOwner).toBe(false);
+    });
+
+    it("distinguishes another user's link from an anonymous one", () => {
+      // Both are `isOwner: false`, and they read very differently in a list.
+      const dto = toLinkDto(makeLink({ ownerId: 'user-1' }), 'https://short.ly', 'user-2');
+      expect(dto.isAnonymous).toBe(false);
+      expect(dto.isOwner).toBe(false);
+    });
+
+    it('marks the viewer as the owner of their own link', () => {
+      const dto = toLinkDto(makeLink({ ownerId: 'user-1' }), 'https://short.ly', 'user-1');
+      expect(dto.isOwner).toBe(true);
+      expect(dto.isAnonymous).toBe(false);
+    });
+
+    it('never exposes the owner id itself', () => {
+      const dto = toLinkDto(makeLink({ ownerId: 'user-1' }), 'https://short.ly', 'user-2');
+      expect(JSON.stringify(dto)).not.toContain('user-1');
+    });
+  });
+
   describe('canViewLinkAnalytics', () => {
-    it('lets anyone read an anonymous link\'s analytics', () => {
-      // Anonymous links are already listed publicly with their visit counts,
-      // so their breakdowns are not a secret either.
+    it("lets anyone read an anonymous link's analytics", () => {
       expect(canViewLinkAnalytics({ ownerId: null })).toBe(true);
       expect(canViewLinkAnalytics({ ownerId: null }, 'user-1')).toBe(true);
     });
@@ -110,32 +136,19 @@ describe('isLinkResolvable', () => {
       expect(canViewLinkAnalytics({ ownerId: 'user-1' }, 'user-1')).toBe(true);
     });
 
-    it('refuses another user', () => {
+    it("refuses another user's link", () => {
       expect(canViewLinkAnalytics({ ownerId: 'user-1' }, 'user-2')).toBe(false);
-    });
-
-    it('refuses an anonymous viewer on an owned link', () => {
       expect(canViewLinkAnalytics({ ownerId: 'user-1' })).toBe(false);
     });
-  });
 
-  describe('canViewAnalytics on the DTO', () => {
-    it('is true for an anonymous link even to an anonymous viewer', () => {
-      // The case that made the UI wrong: isOwner is false here, but the
-      // analytics page loads fine, so gating the link on isOwner hid it.
-      const dto = toLinkDto(makeLink({ ownerId: null }), 'https://short.ly');
-      expect(dto.isOwner).toBe(false);
-      expect(dto.canViewAnalytics).toBe(true);
-    });
+    it('is reported on the DTO so the UI matches what the API enforces', () => {
+      const anon = toLinkDto(makeLink({ ownerId: null }), 'https://short.ly');
+      const theirs = toLinkDto(makeLink({ ownerId: 'user-1' }), 'https://short.ly', 'user-2');
+      const mine = toLinkDto(makeLink({ ownerId: 'user-1' }), 'https://short.ly', 'user-1');
 
-    it('is false for another user\'s link', () => {
-      const dto = toLinkDto(makeLink({ ownerId: 'user-1' }), 'https://short.ly', 'user-2');
-      expect(dto.canViewAnalytics).toBe(false);
-    });
-
-    it('is true for the owner', () => {
-      const dto = toLinkDto(makeLink({ ownerId: 'user-1' }), 'https://short.ly', 'user-1');
-      expect(dto.canViewAnalytics).toBe(true);
+      expect(anon.canViewAnalytics).toBe(true);
+      expect(theirs.canViewAnalytics).toBe(false);
+      expect(mine.canViewAnalytics).toBe(true);
     });
   });
 });

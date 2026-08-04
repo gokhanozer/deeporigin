@@ -15,12 +15,24 @@ import { CopyButton } from '../ui/CopyButton';
 import { Badge, EmptyState } from '../ui/Feedback';
 import { formatNumber, formatRelativeTime, stripProtocol, truncateMiddle } from '../../lib/format';
 import { useToast } from '../../providers/ToastProvider';
-import { isExpired } from '../../lib/link-state';
+import { isExpired, ownerLabel } from '../../lib/link-state';
 import type { Link } from '../../lib/types';
 
 export interface TopLinksTableProps {
   /** Links ranked by visit count, highest first. */
   links: Link[];
+  /**
+   * Called when a row is chosen, instead of navigating to its analytics page.
+   *
+   * Supplied by the dashboard so the charts above can re-render for the chosen
+   * link without leaving the page — comparing two links otherwise means a
+   * round trip through the browser's Back button each time.
+   *
+   * Omit it and each slug is a normal link to its own page.
+   */
+  onSelect?: (link: Link) => void;
+  /** Row to mark as currently shown in the charts. */
+  selectedId?: string | null;
 }
 
 /**
@@ -29,7 +41,11 @@ export interface TopLinksTableProps {
  * @param props The ranked links.
  * @returns The table element.
  */
-export function TopLinksTable({ links }: TopLinksTableProps): React.JSX.Element {
+export function TopLinksTable({
+  links,
+  onSelect,
+  selectedId,
+}: TopLinksTableProps): React.JSX.Element {
   const { showSuccess } = useToast();
 
   if (links.length === 0) {
@@ -45,15 +61,19 @@ export function TopLinksTable({ links }: TopLinksTableProps): React.JSX.Element 
   // Scaled against the leader, so the bars use the full width of the column.
   const maxVisits = Math.max(...links.map((link) => link.visitCount), 1);
 
+
   return (
     // Wide tables scroll inside their own container rather than forcing the
     // whole page to scroll horizontally on a phone.
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[36rem] text-sm">
+      <table className="w-full min-w-[44rem] text-sm">
         <thead>
           <tr className="border-b border-border/70 text-left text-xs uppercase tracking-wide text-subtle">
             <th scope="col" className="px-4 py-2.5 font-medium">
               Short link
+            </th>
+            <th scope="col" className="px-4 py-2.5 font-medium">
+              Owner
             </th>
             <th scope="col" className="px-4 py-2.5 font-medium">
               Destination
@@ -74,18 +94,28 @@ export function TopLinksTable({ links }: TopLinksTableProps): React.JSX.Element 
           {links.map((link) => (
             <tr
               key={link.id}
-              className="border-b border-border/40 transition-colors last:border-b-0 hover:bg-surface-raised/40"
+              aria-current={link.id === selectedId ? 'true' : undefined}
+              className={`border-b border-border/40 transition-colors last:border-b-0 hover:bg-surface-raised/40 ${
+                link.id === selectedId ? 'bg-surface-raised/60' : ''
+              }`}
             >
               <td className="px-4 py-3">
                 <div className="flex flex-wrap items-center gap-2">
-                  {/* On a dashboard the slug drills into that link's metrics.
-                      `canViewAnalytics` rather than `isOwner`, because anonymous
-                      links have no owner and their stats are public — gating on
-                      ownership would have hidden metrics that anyone may read.
-                      Viewers who genuinely cannot load the page follow the short
-                      link instead; either way the Destination column still opens
-                      the target URL. */}
-                  {link.canViewAnalytics ? (
+                  {/* The slug drills into that link's metrics — for your own
+                      links and anonymous ones. Another user's link stays listed
+                      (the brief asks for every URL in the database) but is not
+                      clickable, because its metrics are private. The Owner
+                      column says which case a row is in. */}
+                  {link.canViewAnalytics && onSelect ? (
+                    <button
+                      type="button"
+                      onClick={() => onSelect(link)}
+                      className="font-mono text-brand-hover hover:underline"
+                      title={`Show metrics for /${link.slug}`}
+                    >
+                      /{link.slug}
+                    </button>
+                  ) : link.canViewAnalytics ? (
                     <NextLink
                       href={`/dashboard/links/${link.id}`}
                       className="font-mono text-brand-hover hover:underline"
@@ -94,15 +124,12 @@ export function TopLinksTable({ links }: TopLinksTableProps): React.JSX.Element 
                       /{link.slug}
                     </NextLink>
                   ) : (
-                    <a
-                      href={link.shortUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="font-mono text-brand-hover hover:underline"
-                      title={`Open /${link.slug}`}
+                    <span
+                      className="font-mono text-muted"
+                      title="Metrics for this link are private to its owner"
                     >
                       /{link.slug}
-                    </a>
+                    </span>
                   )}
 
                   {/* Without these, a disabled or expired link sits at the top
@@ -112,6 +139,10 @@ export function TopLinksTable({ links }: TopLinksTableProps): React.JSX.Element 
                   {isExpired(link) && <Badge tone="warning">expired</Badge>}
                 </div>
                 {link.title && <p className="mt-0.5 truncate text-xs text-subtle">{link.title}</p>}
+              </td>
+
+              <td className="whitespace-nowrap px-4 py-3 text-muted">
+                {ownerLabel(link)}
               </td>
 
               <td className="max-w-[18rem] px-4 py-3">

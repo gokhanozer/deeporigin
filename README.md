@@ -1,4 +1,4 @@
-# Shortly — URL Shortener
+# Shortener
 
 A full-stack URL shortener built for the DeepOrigin full-stack task.
 
@@ -283,7 +283,8 @@ Every item from the task description, and where it lives:
 **Beyond the brief:** live slug-availability checking, link search and sorting, per-link
 analytics pages, All-links / My-links scoping, analytics windows from 24 hours to 90 days,
 link expiry, reserved-slug protection, SSRF and stored-XSS guards, privacy-preserving IP
-hashing, health probes, Swagger docs, Prometheus metrics, and 253 backend tests.
+hashing, health probes, Swagger docs, Prometheus metrics, and a backend test suite
+covering every service and pure utility.
 
 ---
 
@@ -335,7 +336,7 @@ npm run dev
 
 ```bash
 # Backend
-npm test              # 253 backend tests
+npm test              # backend suite (no database needed)
 npm run test:cov      # with coverage
 npm run typecheck     # tsc --noEmit
 npm run prisma:studio # browse the database

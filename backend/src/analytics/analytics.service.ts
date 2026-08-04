@@ -142,8 +142,12 @@ export class AnalyticsService {
    * @param days     Look-back window in days.
    * @param viewerId Requesting user's ID, if authenticated.
    * @returns The per-link analytics payload.
+   * Readable for the caller's own links and for anonymous ones. Another
+   * user's link is still listed publicly with its visit count, but its
+   * breakdowns stay private.
+   *
    * @throws {NotFoundException}  When the link does not exist.
-   * @throws {ForbiddenException} When the link is owned by somebody else.
+   * @throws {ForbiddenException} When the link belongs to another user.
    */
   async getLinkAnalytics(
     linkId: string,

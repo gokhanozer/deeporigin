@@ -1,4 +1,4 @@
-# Implementation Notes — Shortly URL Shortener
+# Implementation Notes — Shortener
 
 Complete technical documentation for the DeepOrigin full-stack task.
 
@@ -31,7 +31,7 @@ are stated along with the conditions under which the other option would win.
 
 ## 1. Overview
 
-Shortly turns a long URL into a short one, redirects visitors to the original, and reports
+Shortener turns a long URL into a short one, redirects visitors to the original, and reports
 how popular each link is.
 
 **Core loop**
@@ -1014,13 +1014,9 @@ OpenTelemetry spans would be the next addition, and are not built.
 
 ## 13. Testing
 
-**Jest reports 253 backend tests across 18 suites** — and they need no database
-or Redis, which is why the whole run takes a few seconds.
-
-```
-Test Suites: 18 total
-Tests:       253 total
-```
+The backend suite needs **no database and no Redis** — Prisma is mocked and the
+throttler falls back to in-memory storage — which is why the whole run takes a
+few seconds. Run `npm test` in `backend/` for the current totals.
 
 | Suite | Covers |
 |---|---|

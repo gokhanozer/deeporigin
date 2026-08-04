@@ -121,7 +121,7 @@ stack so the demo serves it.
 | Method | Path | Auth | Description |
 |---|---|:--:|---|
 | `GET` | `/analytics/overview` | optional | Dashboard. `?days=` (1–365), `?mineOnly=` |
-| `GET` | `/analytics/links/:id` | owner | Per-link analytics |
+| `GET` | `/analytics/links/:id` | optional | Per-link analytics. Your own links and anonymous ones; `403` for another user’s |
 
 ### Ops
 

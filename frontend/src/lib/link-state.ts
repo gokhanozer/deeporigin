@@ -33,3 +33,23 @@ export function isExpired(link: Pick<Link, 'expiresAt'>): boolean {
 export function isLive(link: Pick<Link, 'isActive' | 'expiresAt'>): boolean {
   return link.isActive && !isExpired(link);
 }
+
+/** How a link's ownership is described to the person looking at it. */
+export type OwnerLabel = 'You' | 'Anonymous' | 'Another user';
+
+/**
+ * Describes who owns a link, from the current viewer's perspective.
+ *
+ * Three states rather than two: `isOwner: false` covers both "created without
+ * an account" and "belongs to someone else", which read very differently to
+ * someone scanning a list. No detail about the other user is available or
+ * shown — only that the link is spoken for.
+ *
+ * @param link The link to describe.
+ * @returns The label to display.
+ */
+export function ownerLabel(link: Pick<Link, 'isOwner' | 'isAnonymous'>): OwnerLabel {
+  if (link.isOwner) return 'You';
+  if (link.isAnonymous) return 'Anonymous';
+  return 'Another user';
+}
